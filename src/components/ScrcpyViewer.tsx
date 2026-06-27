@@ -15,6 +15,44 @@ import {
   Tv
 } from 'lucide-react';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
+import { h264ParseConfiguration } from '@yume-chan/scrcpy';
+
+// Helper to format SPS & PPS into AVCDecoderConfigurationRecord (avcC) format for WebCodecs
+function createAvcCDecoderConfigurationRecord(
+  sps: Uint8Array,
+  pps: Uint8Array,
+  profileIndex: number,
+  constraintSet: number,
+  levelIndex: number
+): Uint8Array {
+  const totalLength = 1 + 1 + 1 + 1 + 1 + 1 + 2 + sps.length + 1 + 2 + pps.length;
+  const avcC = new Uint8Array(totalLength);
+  let offset = 0;
+
+  avcC[offset++] = 1; // configurationVersion
+  avcC[offset++] = profileIndex; // AVCProfileIndication
+  avcC[offset++] = constraintSet; // profile_compatibility
+  avcC[offset++] = levelIndex; // AVCLevelIndication
+  avcC[offset++] = 0xFF; // lengthSizeMinusOne (reserved 6 bits + lengthSizeMinusOne 2 bits) -> 0xFF (4 bytes)
+  avcC[offset++] = 0xE1; // numOfSequenceParameterSets (reserved 3 bits + numOfSPS 5 bits) -> 0xE1 (1 SPS)
+
+  // SPS length (2 bytes, big endian)
+  avcC[offset++] = (sps.length >> 8) & 0xFF;
+  avcC[offset++] = sps.length & 0xFF;
+  // SPS data
+  avcC.set(sps, offset);
+  offset += sps.length;
+
+  avcC[offset++] = 1; // numOfPictureParameterSets
+
+  // PPS length (2 bytes, big endian)
+  avcC[offset++] = (pps.length >> 8) & 0xFF;
+  avcC[offset++] = pps.length & 0xFF;
+  // PPS data
+  avcC.set(pps, offset);
+
+  return avcC;
+}
 
 // Standard Android Motion Event Action Codes
 enum AndroidMotionEventAction {
@@ -105,17 +143,47 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
 
           // Handle incoming scrcpy packets
           if (value.type === 'configuration') {
-            // Configure decoder with SPS/PPS payload
-            decoder.configure({
-              codec: 'avc1.64002a', // standard compatible H.264 profile
-              description: value.data,
-              optimizeForLatency: true,
-            });
-          } else if (value.type === 'frame') {
+            try {
+              // Parse the Sequence Parameter Set (SPS) and Picture Parameter Set (PPS)
+              const config = h264ParseConfiguration(value.data);
+              
+              // Generate standard AVCDecoderConfigurationRecord (avcC) bytes for WebCodecs
+              const avcC = createAvcCDecoderConfigurationRecord(
+                config.sequenceParameterSet,
+                config.pictureParameterSet,
+                config.profileIndex,
+                config.constraintSet,
+                config.levelIndex
+              );
+
+              // Dynamically build the H.264 codec string using profile and level indicators
+              const profileHex = config.profileIndex.toString(16).padStart(2, '0');
+              const constraintHex = config.constraintSet.toString(16).padStart(2, '0');
+              const levelHex = config.levelIndex.toString(16).padStart(2, '0');
+              const codecStr = `avc1.${profileHex}${constraintHex}${levelHex}`;
+
+              console.log(`Configuring VideoDecoder with codec: ${codecStr}, size: ${config.croppedWidth}x${config.croppedHeight}`);
+              
+              setResolution({ width: config.croppedWidth, height: config.croppedHeight });
+
+              decoder.configure({
+                codec: codecStr,
+                description: avcC,
+                optimizeForLatency: true,
+              });
+            } catch (err: any) {
+              console.error("Failed to parse/construct H264 avcC configuration, attempting raw fallback:", err);
+              decoder.configure({
+                codec: 'avc1.64002a', // standard compatible H.264 profile fallback
+                description: value.data,
+                optimizeForLatency: true,
+              });
+            }
+          } else if (value.type === 'data') {
             if (decoder.state === 'configured') {
               const chunk = new EncodedVideoChunk({
                 type: value.keyframe ? 'key' : 'delta',
-                timestamp: Number(value.pts || 0),
+                timestamp: value.pts !== undefined ? Number(value.pts) : 0,
                 data: value.data,
               });
               decoder.decode(chunk);

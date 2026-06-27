@@ -146,6 +146,7 @@ export class AdbManager {
         logLevel: "debug",
         videoCodec: "h264",
         videoBitRate: 4000000, // 4 Mbps
+        audio: false,
       });
 
       this.scrcpyClient = await AdbScrcpyClient.start(
