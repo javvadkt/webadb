@@ -1,0 +1,6 @@
+{
+  "name": "WebADB Scrcpy",
+  "description": "A 100% client-side web browser clone of WebADB Scrcpy using WebUSB and WebCodecs.",
+  "requestFramePermissions": ["usb"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
