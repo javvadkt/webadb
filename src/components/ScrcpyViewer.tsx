@@ -12,10 +12,44 @@ import {
   Activity, 
   Maximize2, 
   Minimize2,
-  Tv
+  Tv,
+  RotateCw
 } from 'lucide-react';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
-import { h264ParseConfiguration } from '@yume-chan/scrcpy';
+import { h264ParseConfiguration, annexBSplitNalu } from '@yume-chan/scrcpy';
+
+// Helper to convert H.264 Annex B format (start code separated) to AVCC format (4-byte length separated)
+function annexBToAvcc(buffer: Uint8Array): Uint8Array {
+  const nalus: Uint8Array[] = [];
+  try {
+    for (const nalu of annexBSplitNalu(buffer)) {
+      nalus.push(nalu);
+    }
+  } catch (e) {
+    // If splitting fails, return raw buffer as fallback
+    console.error("Failed to split Annex B NAL units:", e);
+    return buffer;
+  }
+
+  let totalLength = 0;
+  for (const nalu of nalus) {
+    totalLength += 4 + nalu.length;
+  }
+
+  const avcc = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const nalu of nalus) {
+    const len = nalu.length;
+    avcc[offset++] = (len >> 24) & 0xFF;
+    avcc[offset++] = (len >> 16) & 0xFF;
+    avcc[offset++] = (len >> 8) & 0xFF;
+    avcc[offset++] = len & 0xFF;
+    avcc.set(nalu, offset);
+    offset += len;
+  }
+
+  return avcc;
+}
 
 // Helper to format SPS & PPS into AVCDecoderConfigurationRecord (avcC) format for WebCodecs
 function createAvcCDecoderConfigurationRecord(
@@ -79,6 +113,39 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
   const [error, setError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [scaleMode, setScaleMode] = useState<'fit' | 'fill'>('fit');
+  const [viewRotation, setViewRotationState] = useState<0 | 90 | 180 | 270>(0);
+  const viewRotationRef = useRef<0 | 90 | 180 | 270>(0);
+
+  const [deviceRotation, setDeviceRotationState] = useState<0 | 1 | 2 | 3>(0);
+
+  const setViewRotation = (rot: 0 | 90 | 180 | 270) => {
+    viewRotationRef.current = rot;
+    setViewRotationState(rot);
+  };
+
+  const handleDeviceRotate = () => {
+    const next = ((deviceRotation + 1) % 4) as 0 | 1 | 2 | 3;
+    setDeviceRotationState(next);
+    if (client.controller?.rotateDevice) {
+      client.controller.rotateDevice().catch(err => {
+        console.error("Failed to rotate device:", err);
+      });
+    }
+  };
+
+  // Sync fullscreen state with document state
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isRealFs = !!document.fullscreenElement;
+      if (!isRealFs && isFullscreen) {
+        setIsFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, [isFullscreen]);
 
   // Calculate FPS every second
   useEffect(() => {
@@ -109,13 +176,33 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
             if (canvas) {
               const ctx = canvas.getContext('2d');
               if (ctx) {
-                // Resize canvas buffer when device orientation/resolution changes
-                if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-                  canvas.width = frame.displayWidth;
-                  canvas.height = frame.displayHeight;
-                  setResolution({ width: frame.displayWidth, height: frame.displayHeight });
+                const rot = viewRotationRef.current;
+                const isRotated = rot === 90 || rot === 270;
+                const targetWidth = isRotated ? frame.displayHeight : frame.displayWidth;
+                const targetHeight = isRotated ? frame.displayWidth : frame.displayHeight;
+
+                // Resize canvas buffer when device orientation/resolution/rotation changes
+                if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+                  canvas.width = targetWidth;
+                  canvas.height = targetHeight;
+                  setResolution({ width: targetWidth, height: targetHeight });
                 }
-                ctx.drawImage(frame, 0, 0, canvas.width, canvas.height);
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                ctx.save();
+                if (rot === 90) {
+                  ctx.translate(canvas.width, 0);
+                  ctx.rotate(Math.PI / 2);
+                } else if (rot === 180) {
+                  ctx.translate(canvas.width, canvas.height);
+                  ctx.rotate(Math.PI);
+                } else if (rot === 270) {
+                  ctx.translate(0, canvas.height);
+                  ctx.rotate(-Math.PI / 2);
+                }
+                ctx.drawImage(frame, 0, 0, frame.displayWidth, frame.displayHeight);
+                ctx.restore();
+
                 setFrameCount((prev) => prev + 1);
               }
             }
@@ -181,12 +268,17 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
             }
           } else if (value.type === 'data') {
             if (decoder.state === 'configured') {
-              const chunk = new EncodedVideoChunk({
-                type: value.keyframe ? 'key' : 'delta',
-                timestamp: value.pts !== undefined ? Number(value.pts) : 0,
-                data: value.data,
-              });
-              decoder.decode(chunk);
+              try {
+                const avccData = annexBToAvcc(value.data);
+                const chunk = new EncodedVideoChunk({
+                  type: value.keyframe ? 'key' : 'delta',
+                  timestamp: value.pts !== undefined ? Number(value.pts) : 0,
+                  data: avccData,
+                });
+                decoder.decode(chunk);
+              } catch (decodeErr: any) {
+                console.error("Failed to construct EncodedVideoChunk or decode:", decodeErr);
+              }
             }
           }
         }
@@ -234,15 +326,36 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
     const x = (clientX / rect.width) * canvas.width;
     const y = (clientY / rect.height) * canvas.height;
 
+    // Calculate unrotated dimensions for original scrcpy coordinates
+    const rot = viewRotationRef.current;
+    const isRotated = rot === 90 || rot === 270;
+    const origWidth = isRotated ? canvas.height : canvas.width;
+    const origHeight = isRotated ? canvas.width : canvas.height;
+
+    // Translate coordinates back to unrotated space
+    let pointerX = x;
+    let pointerY = y;
+
+    if (rot === 90) {
+      pointerX = y;
+      pointerY = origHeight - x;
+    } else if (rot === 180) {
+      pointerX = origWidth - x;
+      pointerY = origHeight - y;
+    } else if (rot === 270) {
+      pointerX = origWidth - y;
+      pointerY = x;
+    }
+
     try {
       if (client.controller?.injectTouch) {
         await client.controller.injectTouch({
           action,
           pointerId: BigInt(0),
-          pointerX: x,
-          pointerY: y,
-          videoWidth: canvas.width,
-          videoHeight: canvas.height,
+          pointerX,
+          pointerY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
           pressure: action === AndroidMotionEventAction.Up ? 0 : 1,
           actionButton: 0,
           buttons: action === AndroidMotionEventAction.Up ? 0 : 1,
@@ -331,12 +444,18 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
   // Fullscreen helper
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(err => {
-        console.error("Error attempting to enable fullscreen:", err);
+    if (!isFullscreen) {
+      setIsFullscreen(true);
+      containerRef.current.requestFullscreen().catch(err => {
+        console.warn("Natively entering fullscreen failed, falling back to simulated inline fullscreen:", err);
       });
     } else {
-      document.exitFullscreen().then(() => setIsFullscreen(false));
+      setIsFullscreen(false);
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(err => {
+          console.warn("Failed to exit native fullscreen:", err);
+        });
+      }
     }
   };
 
@@ -363,8 +482,10 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
       {/* Screen Canvas Container */}
       <div 
         ref={containerRef}
-        className={`relative flex items-center justify-center w-full bg-black rounded-xl overflow-hidden shadow-2xl border border-gray-800 transition-all duration-300 ${
-          isFullscreen ? 'h-screen w-screen rounded-none border-none' : 'max-h-[70vh]'
+        className={`relative flex items-center justify-center bg-black transition-all duration-300 ${
+          isFullscreen 
+            ? 'fixed inset-0 z-50 w-screen h-screen rounded-none border-none' 
+            : 'relative w-full max-h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
         }`}
       >
         {error && (
@@ -395,8 +516,20 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
           style={{ touchAction: 'none' }}
         />
 
-        {/* Floating Quick Settings inside canvas area */}
+         {/* Floating Quick Settings inside canvas area */}
         <div className="absolute top-3 right-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200">
+          <button 
+            onClick={() => {
+              const current = viewRotationRef.current;
+              const next = ((current + 90) % 360) as 0 | 90 | 180 | 270;
+              setViewRotation(next);
+            }}
+            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-emerald-400 rounded-md transition-colors flex items-center space-x-1"
+            title="Rotate View 90°"
+          >
+            <RotateCw className="w-4 h-4" />
+            <span className="text-[10px] font-semibold px-0.5">{viewRotation}°</span>
+          </button>
           <button 
             onClick={() => setScaleMode(prev => prev === 'fit' ? 'fill' : 'fit')}
             className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
@@ -411,11 +544,75 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
         </div>
+
+        {/* Floating Android System Control Bar for Fullscreen mode */}
+        {isFullscreen && (
+          <div className="absolute top-3 left-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200">
+            <button
+              onClick={() => handleNavAction('power')}
+              className="p-1.5 bg-gray-900/80 hover:bg-red-950/80 border border-gray-700/50 text-red-400 rounded-md transition-colors"
+              title="Power Button"
+            >
+              <Power className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => handleNavAction('volumeDown')}
+              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
+              title="Volume Down"
+            >
+              <Volume1 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => handleNavAction('volumeUp')}
+              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
+              title="Volume Up"
+            >
+              <Volume2 className="w-4 h-4" />
+            </button>
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
+            <button
+              onClick={handleDeviceRotate}
+              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-blue-400 rounded-md transition-colors flex items-center"
+              title="Rotate Device UI"
+            >
+              <RotateCw className="w-4 h-4" />
+            </button>
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
+            <button
+              onClick={() => handleNavAction('back')}
+              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
+              title="Back"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => handleNavAction('home')}
+              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
+              title="Home"
+            >
+              <Circle className="w-4 h-4 fill-none" />
+            </button>
+            <button
+              onClick={() => handleNavAction('appSwitch')}
+              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
+              title="Recents"
+            >
+              <Square className="w-4 h-4 fill-none" />
+            </button>
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
+            <button
+              onClick={onDisconnect}
+              className="px-2 py-1.5 text-[10px] font-semibold bg-rose-900/80 hover:bg-rose-800/80 border border-rose-700/50 text-rose-200 rounded-md transition-colors"
+            >
+              Disconnect
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Primary Android Navigation & Quick Controller Bar */}
       <div className="flex items-center justify-between w-full px-6 py-3 bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
-        {/* Left Actions - Power/Volume */}
+        {/* Left Actions - Power/Volume/Rotation */}
         <div className="flex items-center space-x-2">
           <button
             onClick={() => handleNavAction('power')}
@@ -437,6 +634,13 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
             title="Volume Up"
           >
             <Volume2 className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleDeviceRotate}
+            className="p-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/20 rounded-lg transition-colors flex items-center space-x-1 border border-transparent hover:border-emerald-900/30"
+            title="Rotate Device OS"
+          >
+            <RotateCw className="w-4 h-4" />
           </button>
         </div>
 
