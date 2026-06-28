@@ -58,6 +58,7 @@ export interface ScrcpySettings {
   maxSize?: number;
   maxFps?: number;
   tunnelForward?: boolean;
+  turnScreenOff?: boolean;
 }
 
 export class AdbManager {
@@ -155,6 +156,7 @@ export class AdbManager {
       options.value.maxFps = settings?.maxFps ?? 30;
       options.value.audio = false; // Disable audio, often causes issues on new Androids
       options.value.tunnelForward = settings?.tunnelForward ?? true;
+      (options.value as any).turnScreenOff = settings?.turnScreenOff ?? false;
       options.value.displayId = 0; // Force main display to fix Motorola "Ready For" bug
       options.value.clipboardAutosync = false; // Disable clipboard sync for Android 14 security
 

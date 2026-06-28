@@ -14,7 +14,8 @@ import {
   Minimize2,
   Tv,
   RotateCw,
-  Grid
+  Grid,
+  Smartphone
 } from 'lucide-react';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
 import { h264ParseConfiguration, annexBSplitNalu } from '@yume-chan/scrcpy';
@@ -102,9 +103,10 @@ interface ScrcpyViewerProps {
   onDisconnect: () => void;
   deviceName?: string;
   onOpenLauncher?: () => void;
+  initialTurnScreenOff?: boolean;
 }
 
-export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenLauncher }: ScrcpyViewerProps) {
+export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenLauncher, initialTurnScreenOff }: ScrcpyViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isMouseDownRef = useRef<boolean>(false);
@@ -114,7 +116,8 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
   const [frameCount, setFrameCount] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [scaleMode, setScaleMode] = useState<'fit' | 'fill'>('fit');
+  const [scaleMode, setScaleMode] = useState<'fit' | 'stretch' | 'center'>('center');
+  const [isScreenOff, setIsScreenOff] = useState<boolean>(false);
   const [viewRotation, setViewRotationState] = useState<0 | 90 | 180 | 270>(0);
   const viewRotationRef = useRef<0 | 90 | 180 | 270>(0);
 
@@ -157,6 +160,21 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
     }, 1000);
     return () => clearInterval(interval);
   }, [frameCount]);
+
+  // Apply initial screen power state from settings
+  useEffect(() => {
+    if (client && client.controller) {
+      if (initialTurnScreenOff) {
+        setIsScreenOff(true);
+        // Add a slight delay to ensure controller is fully ready to process messages
+        setTimeout(() => {
+          client.controller?.setScreenPowerMode?.(0).catch((e) => {
+             console.error("Failed to set initial screen power mode", e);
+          });
+        }, 500);
+      }
+    }
+  }, [client, initialTurnScreenOff]);
 
   // Video stream consumer and decoder loop
   useEffect(() => {
@@ -333,7 +351,7 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
     let drawHeight = rect.height;
 
     // Adjust for object-contain letterboxing
-    if (scaleMode === 'fit') {
+    if (scaleMode !== 'stretch') {
       const scale = Math.min(scaleX, scaleY);
       drawWidth = canvas.width * scale;
       drawHeight = canvas.height * scale;
@@ -519,7 +537,9 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
         className={`relative flex items-center justify-center bg-black transition-all duration-300 ${
           isFullscreen 
             ? 'fixed inset-0 z-50 w-screen h-screen rounded-none border-none' 
-            : 'relative w-full h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
+            : scaleMode === 'center'
+              ? 'relative w-fit max-w-full mx-auto max-h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
+              : 'relative w-full h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
         }`}
       >
         {error && (
@@ -544,8 +564,26 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseLeave}
-          className={`cursor-pointer transition-all duration-300 select-none w-full h-full ${
-            scaleMode === 'fit' ? 'object-contain' : 'object-fill'
+          onContextMenu={async (e) => {
+            e.preventDefault();
+            if (!client || !client.controller) return;
+            try {
+              if (client.controller.backOrScreenOn) {
+                await client.controller.backOrScreenOn(0); // Down
+                await client.controller.backOrScreenOn(1); // Up
+              } else {
+                handleNavAction('back');
+              }
+            } catch (err) {
+              console.error('Failed to send backOrScreenOn:', err);
+            }
+          }}
+          className={`cursor-pointer transition-all duration-300 select-none ${
+            scaleMode === 'center' 
+              ? `w-auto h-auto max-w-full object-contain ${isFullscreen ? 'max-h-full' : 'max-h-[70vh]'}` 
+              : scaleMode === 'fit' 
+                ? 'w-full h-full object-contain' 
+                : 'w-full h-full object-fill'
           }`}
           style={{ touchAction: 'none' }}
         />
@@ -565,11 +603,28 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
             <span className="text-[10px] font-semibold px-0.5">{viewRotation}°</span>
           </button>
           <button 
-            onClick={() => setScaleMode(prev => prev === 'fit' ? 'fill' : 'fit')}
+            onClick={async () => {
+              if (client.controller?.setScreenPowerMode) {
+                try {
+                  const newMode = isScreenOff ? 2 : 0; // 2 = Normal, 0 = Off
+                  await client.controller.setScreenPowerMode(newMode);
+                  setIsScreenOff(!isScreenOff);
+                } catch (e) {
+                  console.error('Failed to toggle screen power mode', e);
+                }
+              }
+            }}
+            className={`p-1.5 border rounded-md transition-colors ${isScreenOff ? 'bg-emerald-900/80 hover:bg-emerald-800 border-emerald-700/50 text-emerald-400' : 'bg-gray-900/80 hover:bg-gray-800 border-gray-700/50 text-gray-300'}`}
+            title="Turn Phone Screen Off/On"
+          >
+            <Smartphone className="w-4 h-4" />
+          </button>
+          <button 
+            onClick={() => setScaleMode(prev => prev === 'center' ? 'fit' : prev === 'fit' ? 'stretch' : 'center')}
             className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
             title="Toggle Aspect Ratio"
           >
-            {scaleMode === 'fit' ? 'Stretch' : 'Fit'}
+            {scaleMode === 'center' ? 'Center' : scaleMode === 'fit' ? 'Fit' : 'Stretch'}
           </button>
           <button 
             onClick={toggleFullscreen}
@@ -582,6 +637,25 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
         {/* Floating Android System Control Bar for Fullscreen mode */}
         {isFullscreen && (
           <div className="absolute top-3 left-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200">
+            <button
+              onClick={async () => {
+                if (client.controller?.setScreenPowerMode) {
+                  try {
+                    const newMode = isScreenOff ? 2 : 0;
+                    await client.controller.setScreenPowerMode(newMode);
+                    setIsScreenOff(!isScreenOff);
+                  } catch (e) {
+                    console.error('Failed to toggle screen power mode', e);
+                  }
+                }
+              }}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors border flex items-center space-x-1.5 ${isScreenOff ? 'bg-emerald-950/80 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900' : 'bg-gray-900/80 text-gray-300 border-gray-700/50 hover:bg-gray-800'}`}
+              title="Toggle Physical Device Screen (Keep Mirroring Alive)"
+            >
+              <Smartphone className="w-4 h-4" />
+              <span className="hidden sm:inline">{isScreenOff ? "Screen Off" : "Screen On"}</span>
+            </button>
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
             <button
               onClick={() => handleNavAction('power')}
               className="p-1.5 bg-gray-900/80 hover:bg-red-950/80 border border-gray-700/50 text-red-400 rounded-md transition-colors"
@@ -648,6 +722,25 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
       <div className="flex items-center justify-between w-full px-6 py-3 bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
         {/* Left Actions - Power/Volume/Rotation */}
         <div className="flex items-center space-x-2">
+          <button
+            onClick={async () => {
+              if (client.controller?.setScreenPowerMode) {
+                try {
+                  const newMode = isScreenOff ? 2 : 0;
+                  await client.controller.setScreenPowerMode(newMode);
+                  setIsScreenOff(!isScreenOff);
+                } catch (e) {
+                  console.error('Failed to toggle screen power mode', e);
+                }
+              }
+            }}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${isScreenOff ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' : 'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 hover:text-gray-200'}`}
+            title="Toggle Physical Device Screen (Keep Mirroring Alive)"
+          >
+            <Smartphone className="w-4 h-4" />
+            <span className="hidden sm:inline">{isScreenOff ? "Screen Off" : "Screen On"}</span>
+          </button>
+          <div className="w-px h-6 bg-gray-800 mx-1" />
           <button
             onClick={() => handleNavAction('power')}
             className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors border border-transparent hover:border-red-900/30"

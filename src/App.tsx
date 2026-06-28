@@ -38,6 +38,7 @@ export default function App() {
     maxSize: 800,
     maxFps: 30,
     tunnelForward: true,
+    turnScreenOff: false,
   });
 
   // Compatibility flags checked at runtime
@@ -323,6 +324,19 @@ export default function App() {
                         className="accent-emerald-500 w-4 h-4"
                       />
                     </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs font-medium text-gray-300 block">Turn off screen</label>
+                        <p className="text-[10px] text-gray-500">Keep phone screen black while mirroring.</p>
+                      </div>
+                      <input 
+                        type="checkbox" 
+                        checked={settings.turnScreenOff} 
+                        onChange={(e) => setSettings({...settings, turnScreenOff: e.target.checked})}
+                        className="accent-emerald-500 w-4 h-4"
+                      />
+                    </div>
                   </motion.div>
                 )}
               </div>
@@ -434,6 +448,7 @@ export default function App() {
               onDisconnect={handleDisconnect} 
               deviceName={connectionState.deviceName}
               onOpenLauncher={handleOpenLauncher}
+              initialTurnScreenOff={settings.turnScreenOff}
             />
           </motion.div>
         )}
