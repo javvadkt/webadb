@@ -39,6 +39,8 @@ export default function App() {
     maxFps: 30,
     tunnelForward: true,
     turnScreenOff: false,
+    audio: true,
+    muteDeviceSpeaker: true,
   });
 
   // Compatibility flags checked at runtime
@@ -337,6 +339,34 @@ export default function App() {
                         className="accent-emerald-500 w-4 h-4"
                       />
                     </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs font-medium text-gray-300 block">Audio Forwarding</label>
+                        <p className="text-[10px] text-gray-500">Play phone audio through browser (Android 11+).</p>
+                      </div>
+                      <input 
+                        type="checkbox" 
+                        checked={settings.audio} 
+                        onChange={(e) => setSettings({...settings, audio: e.target.checked})}
+                        className="accent-emerald-500 w-4 h-4"
+                      />
+                    </div>
+
+                    {settings.audio && (
+                      <div className="flex items-center justify-between pl-4 border-l border-emerald-950/40">
+                        <div>
+                          <label className="text-xs font-medium text-gray-300 block">Mute Phone Speaker</label>
+                          <p className="text-[10px] text-gray-500">Silence phone speaker (sound only plays on PC).</p>
+                        </div>
+                        <input 
+                          type="checkbox" 
+                          checked={settings.muteDeviceSpeaker ?? false} 
+                          onChange={(e) => setSettings({...settings, muteDeviceSpeaker: e.target.checked})}
+                          className="accent-emerald-500 w-4 h-4"
+                        />
+                      </div>
+                    )}
                   </motion.div>
                 )}
               </div>
@@ -449,6 +479,9 @@ export default function App() {
               deviceName={connectionState.deviceName}
               onOpenLauncher={handleOpenLauncher}
               initialTurnScreenOff={settings.turnScreenOff}
+              initialAudioEnabled={settings.audio}
+              initialMuteDeviceSpeaker={settings.muteDeviceSpeaker}
+              adb={manager.getAdb()}
             />
           </motion.div>
         )}
@@ -470,7 +503,7 @@ export default function App() {
             
             {connectionState.error?.includes('claimInterface') && (
               <div className="mt-4 p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg text-left">
-                <h4 className="text-xs font-bold text-blue-400 mb-1">How to fix "Unable to claim interface":</h4>
+                <h4 className="text-xs font-bold text-blue-400 mb-1">How to fix &quot;Unable to claim interface&quot;:</h4>
                 <ul className="text-xs text-blue-200/80 list-disc pl-4 space-y-1">
                   <li>Another ADB server (like Android Studio or scrcpy desktop) is running. Open your terminal and run <code>adb kill-server</code>, then refresh this page.</li>
                   <li>You might need to unplug and re-plug your phone.</li>
@@ -565,7 +598,7 @@ export default function App() {
                     ))}
                   {installedApps.filter(app => app.toLowerCase().includes(appSearchTerm.toLowerCase())).length === 0 && !isLoadingApps && (
                     <div className="col-span-full py-12 text-center text-gray-500">
-                      No apps found matching "{appSearchTerm}"
+                      No apps found matching &quot;{appSearchTerm}&quot;
                     </div>
                   )}
                 </div>

@@ -59,6 +59,8 @@ export interface ScrcpySettings {
   maxFps?: number;
   tunnelForward?: boolean;
   turnScreenOff?: boolean;
+  audio?: boolean;
+  muteDeviceSpeaker?: boolean;
 }
 
 export class AdbManager {
@@ -154,7 +156,8 @@ export class AdbManager {
       options.value.videoBitRate = settings?.videoBitRate ?? 2000000;
       options.value.maxSize = settings?.maxSize ?? 800;
       options.value.maxFps = settings?.maxFps ?? 30;
-      options.value.audio = false; // Disable audio, often causes issues on new Androids
+      options.value.audio = settings?.audio ?? true;
+      (options.value as any).audioSource = "playback";
       options.value.tunnelForward = settings?.tunnelForward ?? true;
       (options.value as any).turnScreenOff = settings?.turnScreenOff ?? false;
       options.value.displayId = 0; // Force main display to fix Motorola "Ready For" bug
@@ -228,6 +231,17 @@ export class AdbManager {
     } catch (e) {
       console.error("Error during disconnect:", e);
     }
+  }
+
+  getAdb(): Adb | null {
+    return this.adb;
+  }
+
+  async executeShell(command: string): Promise<string> {
+    if (!this.adb) {
+      throw new Error("No active ADB connection");
+    }
+    return await this.adb.subprocess.noneProtocol.spawnWaitText(command);
   }
 
   async getInstalledApps(): Promise<string[]> {
