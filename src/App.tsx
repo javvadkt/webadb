@@ -11,9 +11,12 @@ import {
   AlertCircle, 
   Usb, 
   CheckCircle2, 
-  ExternalLink 
+  ExternalLink,
+  Search,
+  X,
+  Play
 } from 'lucide-react';
-import { AdbManager, ConnectionState } from './utils/adbManager';
+import { AdbManager, ConnectionState, ScrcpySettings } from './utils/adbManager';
 import ScrcpyViewer from './components/ScrcpyViewer';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
 import { AdbWebUsbBackend } from '@yume-chan/adb-backend-webusb';
@@ -23,6 +26,19 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>({ status: 'idle' });
   const [pairedDevices, setPairedDevices] = useState<AdbWebUsbBackend[]>([]);
   const [scrcpyClient, setScrcpyClient] = useState<AdbScrcpyClient<any> | null>(null);
+
+  const [showAppLauncher, setShowAppLauncher] = useState<boolean>(false);
+  const [installedApps, setInstalledApps] = useState<string[]>([]);
+  const [isLoadingApps, setIsLoadingApps] = useState<boolean>(false);
+  const [appSearchTerm, setAppSearchTerm] = useState<string>('');
+  
+  const [showSettings, setShowSettings] = useState<boolean>(false);
+  const [settings, setSettings] = useState<ScrcpySettings>({
+    videoBitRate: 2000000,
+    maxSize: 800,
+    maxFps: 30,
+    tunnelForward: true,
+  });
 
   // Compatibility flags checked at runtime
   const [isSecure, setIsSecure] = useState<boolean>(true);
@@ -76,7 +92,7 @@ export default function App() {
     try {
       const client = await manager.connect(backend, (state) => {
         setConnectionState(state);
-      });
+      }, settings);
       setScrcpyClient(client);
     } catch (err) {
       console.error("Connection workflow failed:", err);
@@ -103,7 +119,23 @@ export default function App() {
     await manager.disconnect();
     setScrcpyClient(null);
     setConnectionState({ status: 'idle' });
+    setShowAppLauncher(false);
     loadPairedDevices();
+  };
+
+  const handleOpenLauncher = async () => {
+    setShowAppLauncher(true);
+    if (installedApps.length === 0) {
+      setIsLoadingApps(true);
+      const apps = await manager.getInstalledApps();
+      setInstalledApps(apps);
+      setIsLoadingApps(false);
+    }
+  };
+
+  const handleLaunchApp = async (packageName: string) => {
+    await manager.launchApp(packageName);
+    setShowAppLauncher(false);
   };
 
   // Compatibility warning banners
@@ -227,6 +259,73 @@ export default function App() {
                   </p>
                 </div>
               </div>
+
+              {/* Advanced Settings Toggle */}
+              <div className="pt-4 border-t border-gray-800/50">
+                <button
+                  onClick={() => setShowSettings(!showSettings)}
+                  className="flex items-center text-xs font-semibold text-emerald-400 hover:text-emerald-300 transition-colors"
+                >
+                  <Cpu className="w-3.5 h-3.5 mr-1.5" />
+                  {showSettings ? 'Hide Advanced Settings' : 'Show Advanced Settings'}
+                </button>
+
+                {showSettings && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    className="mt-4 p-4 bg-gray-900/40 border border-gray-800/60 rounded-xl space-y-4"
+                  >
+                    <div>
+                      <label className="text-xs font-medium text-gray-300 block mb-1">Max Resolution Size: {settings.maxSize}px</label>
+                      <input 
+                        type="range" 
+                        min="480" max="1920" step="10"
+                        value={settings.maxSize} 
+                        onChange={(e) => setSettings({...settings, maxSize: parseInt(e.target.value)})}
+                        className="w-full accent-emerald-500"
+                      />
+                      <p className="text-[10px] text-gray-500 mt-1">Lower if connection drops immediately.</p>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-medium text-gray-300 block mb-1">Video Bitrate: {Math.round((settings.videoBitRate || 2000000) / 1000000)} Mbps</label>
+                      <input 
+                        type="range" 
+                        min="1000000" max="8000000" step="500000"
+                        value={settings.videoBitRate} 
+                        onChange={(e) => setSettings({...settings, videoBitRate: parseInt(e.target.value)})}
+                        className="w-full accent-emerald-500"
+                      />
+                      <p className="text-[10px] text-gray-500 mt-1">Lower if the stream lags or glitches.</p>
+                    </div>
+                    
+                    <div>
+                      <label className="text-xs font-medium text-gray-300 block mb-1">Max FPS: {settings.maxFps}</label>
+                      <input 
+                        type="range" 
+                        min="15" max="120" step="5"
+                        value={settings.maxFps} 
+                        onChange={(e) => setSettings({...settings, maxFps: parseInt(e.target.value)})}
+                        className="w-full accent-emerald-500"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <label className="text-xs font-medium text-gray-300 block">Forward Tunnel</label>
+                        <p className="text-[10px] text-gray-500">Toggle if you see &quot;transferIn&quot; error.</p>
+                      </div>
+                      <input 
+                        type="checkbox" 
+                        checked={settings.tunnelForward} 
+                        onChange={(e) => setSettings({...settings, tunnelForward: e.target.checked})}
+                        className="accent-emerald-500 w-4 h-4"
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </div>
             </div>
 
             {/* Right column - Connection Panel */}
@@ -334,6 +433,7 @@ export default function App() {
               client={scrcpyClient} 
               onDisconnect={handleDisconnect} 
               deviceName={connectionState.deviceName}
+              onOpenLauncher={handleOpenLauncher}
             />
           </motion.div>
         )}
@@ -349,9 +449,30 @@ export default function App() {
               <AlertCircle className="w-6 h-6" />
             </div>
             <h3 className="text-md font-bold text-gray-200">Connection Terminated</h3>
-            <p className="text-xs text-gray-400 mt-2 px-4 leading-relaxed bg-gray-950/40 border border-gray-800/80 p-3 rounded-xl font-mono text-left overflow-x-auto">
+            <p className="text-xs text-gray-400 mt-2 px-4 leading-relaxed bg-gray-950/40 border border-gray-800/80 p-3 rounded-xl font-mono text-left overflow-x-auto whitespace-pre-wrap">
               {connectionState.error || "An unknown ADB error occurred."}
             </p>
+            
+            {connectionState.error?.includes('claimInterface') && (
+              <div className="mt-4 p-3 bg-blue-950/30 border border-blue-900/50 rounded-lg text-left">
+                <h4 className="text-xs font-bold text-blue-400 mb-1">How to fix "Unable to claim interface":</h4>
+                <ul className="text-xs text-blue-200/80 list-disc pl-4 space-y-1">
+                  <li>Another ADB server (like Android Studio or scrcpy desktop) is running. Open your terminal and run <code>adb kill-server</code>, then refresh this page.</li>
+                  <li>You might need to unplug and re-plug your phone.</li>
+                  <li>Ensure no other browser tabs are connected to the phone.</li>
+                </ul>
+              </div>
+            )}
+            
+            {connectionState.error?.includes('ExactReadable ended') && (
+              <div className="mt-4 p-3 bg-orange-950/30 border border-orange-900/50 rounded-lg text-left">
+                <h4 className="text-xs font-bold text-orange-400 mb-1">Scrcpy Server Crashed:</h4>
+                <ul className="text-xs text-orange-200/80 list-disc pl-4 space-y-1">
+                  <li>Your device might not support the selected video encoder or resolution.</li>
+                  <li>Try restarting your device or toggling USB Debugging off and on again.</li>
+                </ul>
+              </div>
+            )}
 
             <div className="mt-6 flex flex-col space-y-2">
               <button
@@ -371,6 +492,73 @@ export default function App() {
           </motion.div>
         )}
       </main>
+
+      {/* App Launcher Modal */}
+      {showAppLauncher && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/80 backdrop-blur-sm p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="w-full max-w-2xl max-h-[85vh] flex flex-col bg-gray-900 border border-gray-800 rounded-2xl shadow-2xl overflow-hidden"
+          >
+            <div className="flex items-center justify-between p-4 border-b border-gray-800">
+              <h2 className="text-lg font-bold text-gray-100">App Launcher</h2>
+              <button 
+                onClick={() => setShowAppLauncher(false)}
+                className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded-lg transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-4 border-b border-gray-800 bg-gray-950/50">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+                <input
+                  type="text"
+                  placeholder="Search packages..."
+                  value={appSearchTerm}
+                  onChange={(e) => setAppSearchTerm(e.target.value)}
+                  className="w-full bg-gray-900 border border-gray-700 text-gray-200 rounded-lg pl-10 pr-4 py-2 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+              {isLoadingApps ? (
+                <div className="flex flex-col items-center justify-center py-12 text-gray-500">
+                  <RefreshCw className="w-8 h-8 animate-spin mb-4" />
+                  <p>Fetching installed apps...</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                  {installedApps
+                    .filter(app => app.toLowerCase().includes(appSearchTerm.toLowerCase()))
+                    .map(app => (
+                      <button
+                        key={app}
+                        onClick={() => handleLaunchApp(app)}
+                        className="flex items-center p-3 space-x-3 bg-gray-950/50 hover:bg-emerald-950/30 border border-gray-800 hover:border-emerald-900/50 rounded-xl text-left transition-colors group"
+                      >
+                        <div className="w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center group-hover:bg-emerald-900/50 transition-colors">
+                          <Play className="w-4 h-4 text-emerald-400" />
+                        </div>
+                        <span className="flex-1 text-xs font-mono text-gray-300 truncate" title={app}>
+                          {app}
+                        </span>
+                      </button>
+                    ))}
+                  {installedApps.filter(app => app.toLowerCase().includes(appSearchTerm.toLowerCase())).length === 0 && !isLoadingApps && (
+                    <div className="col-span-full py-12 text-center text-gray-500">
+                      No apps found matching "{appSearchTerm}"
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {/* Humble Footer */}
       <footer className="border-t border-gray-900 py-6 text-center text-[10px] text-gray-600 font-mono">

@@ -13,7 +13,8 @@ import {
   Maximize2, 
   Minimize2,
   Tv,
-  RotateCw
+  RotateCw,
+  Grid
 } from 'lucide-react';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
 import { h264ParseConfiguration, annexBSplitNalu } from '@yume-chan/scrcpy';
@@ -100,9 +101,10 @@ interface ScrcpyViewerProps {
   client: AdbScrcpyClient<any>;
   onDisconnect: () => void;
   deviceName?: string;
+  onOpenLauncher?: () => void;
 }
 
-export default function ScrcpyViewer({ client, onDisconnect, deviceName }: ScrcpyViewerProps) {
+export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenLauncher }: ScrcpyViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isMouseDownRef = useRef<boolean>(false);
@@ -322,9 +324,41 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
     const clientX = e.clientX - rect.left;
     const clientY = e.clientY - rect.top;
 
+    let scaleX = rect.width / canvas.width;
+    let scaleY = rect.height / canvas.height;
+    
+    let offsetX = 0;
+    let offsetY = 0;
+    let drawWidth = rect.width;
+    let drawHeight = rect.height;
+
+    // Adjust for object-contain letterboxing
+    if (scaleMode === 'fit') {
+      const scale = Math.min(scaleX, scaleY);
+      drawWidth = canvas.width * scale;
+      drawHeight = canvas.height * scale;
+      offsetX = (rect.width - drawWidth) / 2;
+      offsetY = (rect.height - drawHeight) / 2;
+      scaleX = scale;
+      scaleY = scale;
+    }
+
+    const imageClientX = clientX - offsetX;
+    const imageClientY = clientY - offsetY;
+
+    // Ignore events that happen in the black letterbox borders
+    if (
+      imageClientX < 0 || 
+      imageClientX > drawWidth || 
+      imageClientY < 0 || 
+      imageClientY > drawHeight
+    ) {
+      return;
+    }
+
     // Map relative layout coords to intrinsic canvas coords
-    const x = (clientX / rect.width) * canvas.width;
-    const y = (clientY / rect.height) * canvas.height;
+    const x = imageClientX / scaleX;
+    const y = imageClientY / scaleY;
 
     // Calculate unrotated dimensions for original scrcpy coordinates
     const rot = viewRotationRef.current;
@@ -485,7 +519,7 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
         className={`relative flex items-center justify-center bg-black transition-all duration-300 ${
           isFullscreen 
             ? 'fixed inset-0 z-50 w-screen h-screen rounded-none border-none' 
-            : 'relative w-full max-h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
+            : 'relative w-full h-[70vh] rounded-xl overflow-hidden shadow-2xl border border-gray-800'
         }`}
       >
         {error && (
@@ -510,8 +544,8 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseLeave}
-          className={`cursor-pointer transition-all duration-300 select-none ${
-            scaleMode === 'fit' ? 'max-w-full max-h-full object-contain' : 'w-full h-full object-cover'
+          className={`cursor-pointer transition-all duration-300 select-none w-full h-full ${
+            scaleMode === 'fit' ? 'object-contain' : 'object-fill'
           }`}
           style={{ touchAction: 'none' }}
         />
@@ -641,6 +675,14 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName }: Scrcp
             title="Rotate Device OS"
           >
             <RotateCw className="w-4 h-4" />
+          </button>
+          <div className="w-px h-6 bg-gray-800 mx-2" />
+          <button
+            onClick={onOpenLauncher}
+            className="p-2 text-emerald-400 bg-emerald-950/20 hover:bg-emerald-900/40 rounded-lg transition-colors flex items-center space-x-1 border border-emerald-900/30"
+            title="App Launcher"
+          >
+            <Grid className="w-4 h-4" />
           </button>
         </div>
 

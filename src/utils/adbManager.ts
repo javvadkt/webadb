@@ -1,6 +1,6 @@
 import { Adb, AdbCredentialStore, AdbPrivateKey, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbWebUsbBackend, AdbWebUsbBackendManager } from '@yume-chan/adb-backend-webusb';
-import { AdbScrcpyClient, AdbScrcpyOptions2_1 } from '@yume-chan/adb-scrcpy';
+import { AdbScrcpyClient, AdbScrcpyOptionsLatest } from '@yume-chan/adb-scrcpy';
 import { Consumable, ReadableStream } from '@yume-chan/stream-extra';
 
 // Local storage credential store for ADB authorization keys
@@ -53,6 +53,13 @@ export interface ConnectionState {
   error?: string;
 }
 
+export interface ScrcpySettings {
+  videoBitRate?: number;
+  maxSize?: number;
+  maxFps?: number;
+  tunnelForward?: boolean;
+}
+
 export class AdbManager {
   private adb: Adb | null = null;
   private scrcpyClient: AdbScrcpyClient<any> | null = null;
@@ -81,7 +88,8 @@ export class AdbManager {
 
   async connect(
     backend: AdbWebUsbBackend,
-    onStateChange: (state: ConnectionState) => void
+    onStateChange: (state: ConnectionState) => void,
+    settings?: ScrcpySettings
   ): Promise<AdbScrcpyClient<any>> {
     try {
       this.backend = backend;
@@ -105,21 +113,15 @@ export class AdbManager {
       
       let serverBytes: Uint8Array;
       try {
-        // Try to fetch from local public folder
-        const response = await fetch('/scrcpy-server.jar');
+        // Fetch via our Next.js API route proxy to avoid CORS issues from Github
+        const response = await fetch('/api/scrcpy?v=3.3.3');
         if (!response.ok) {
-          throw new Error(`Failed to fetch local server: ${response.status}`);
+          throw new Error(`Failed to fetch proxy server: ${response.status}`);
         }
         serverBytes = new Uint8Array(await response.arrayBuffer());
       } catch (err) {
-        console.warn("Could not load local /scrcpy-server.jar, falling back to public CDN...", err);
-        // Fallback to official JsDelivr CDN hosting Genymobile scrcpy-server v2.1
-        const fallbackUrl = 'https://cdn.jsdelivr.net/gh/Genymobile/scrcpy@v2.1/server/scrcpy-server';
-        const response = await fetch(fallbackUrl);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch scrcpy-server from fallback CDN: ${response.status}`);
-        }
-        serverBytes = new Uint8Array(await response.arrayBuffer());
+        console.warn("Could not load scrcpy-server from API proxy", err);
+        throw new Error("Could not download scrcpy-server for injection. Please check internet connection.");
       }
 
       // Push to /data/local/tmp/scrcpy-server.jar
@@ -141,13 +143,20 @@ export class AdbManager {
       // Step 3: Start Scrcpy Server
       onStateChange({ status: 'starting_server', deviceName: backend.name });
 
-      // Instantiate options for scrcpy (compatible with v2.1)
-      const options = new AdbScrcpyOptions2_1({
-        logLevel: "debug",
-        videoCodec: "h264",
-        videoBitRate: 4000000, // 4 Mbps
-        audio: false,
-      });
+      // Instantiate options for scrcpy (compatible with v3.3)
+      const options = new AdbScrcpyOptionsLatest(
+        AdbScrcpyOptionsLatest.Defaults
+      );
+      // Override specific defaults for performance and compatibility (especially Moto G85 / Android 14+)
+      options.value.logLevel = "debug";
+      options.value.videoCodec = "h264";
+      options.value.videoBitRate = settings?.videoBitRate ?? 2000000;
+      options.value.maxSize = settings?.maxSize ?? 800;
+      options.value.maxFps = settings?.maxFps ?? 30;
+      options.value.audio = false; // Disable audio, often causes issues on new Androids
+      options.value.tunnelForward = settings?.tunnelForward ?? true;
+      options.value.displayId = 0; // Force main display to fix Motorola "Ready For" bug
+      options.value.clipboardAutosync = false; // Disable clipboard sync for Android 14 security
 
       this.scrcpyClient = await AdbScrcpyClient.start(
         this.adb,
@@ -155,14 +164,33 @@ export class AdbManager {
         options
       );
 
+      // Consume and log the scrcpy server output so we can see any encoder errors on the device
+      if (this.scrcpyClient.output) {
+        this.scrcpyClient.output.pipeTo(new WritableStream({
+          write(chunk) {
+            console.log('[scrcpy-server]', chunk);
+          }
+        }) as any).catch((e) => {
+          console.warn('scrcpy-server output stream closed', e);
+        });
+      }
+
       onStateChange({ status: 'active', deviceName: backend.name });
       return this.scrcpyClient;
 
     } catch (error: any) {
-      console.error("Connection failed:", error);
+      console.error("Scrcpy failed to start. Full details:", error);
+      
+      // If the error contains server output lines, print them out clearly
+      if (error.output) {
+        console.error("Android Server Log:", error.output.join('\n'));
+      }
+      
+      const errorMessage = error.output ? error.output.join(' | ') : (error?.message || String(error));
+      
       onStateChange({
         status: 'disconnected',
-        error: error?.message || String(error),
+        error: errorMessage,
       });
       await this.disconnect();
       throw error;
@@ -183,9 +211,51 @@ export class AdbManager {
         await this.adb.close();
         this.adb = null;
       }
+      
+      // Explicitly close the WebUSB device if it was left open
+      if (this.backend && this.backend.device) {
+        try {
+          if (this.backend.device.opened) {
+            await this.backend.device.close();
+          }
+        } catch (deviceCloseError) {
+          console.warn("Failed to close underlying WebUSB device:", deviceCloseError);
+        }
+      }
       this.backend = null;
     } catch (e) {
       console.error("Error during disconnect:", e);
+    }
+  }
+
+  async getInstalledApps(): Promise<string[]> {
+    if (!this.adb) {
+      throw new Error("No active ADB connection");
+    }
+    try {
+      // Use spawnWaitText to run the command and get output as string
+      const output = await this.adb.subprocess.noneProtocol.spawnWaitText("cmd package list packages -3");
+      const apps = output.split('\n')
+        .map(line => line.trim())
+        .filter(line => line.startsWith('package:'))
+        .map(line => line.replace('package:', ''));
+      return apps.sort();
+    } catch (e) {
+      console.error("Failed to list apps:", e);
+      return [];
+    }
+  }
+
+  async launchApp(packageName: string): Promise<void> {
+    if (!this.adb) {
+      throw new Error("No active ADB connection");
+    }
+    try {
+      await this.adb.subprocess.noneProtocol.spawnWaitText(
+        `monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`
+      );
+    } catch (e) {
+      console.error(`Failed to launch app ${packageName}:`, e);
     }
   }
 }
