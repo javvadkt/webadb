@@ -17,12 +17,17 @@ import {
   RotateCw,
   Grid,
   Smartphone,
+  Moon,
   Gauge,
-  SlidersHorizontal
+  SlidersHorizontal,
+  Gamepad,
+  Speaker,
+  X
 } from 'lucide-react';
 import { AdbScrcpyClient } from '@yume-chan/adb-scrcpy';
 import { h264ParseConfiguration, annexBSplitNalu } from '@yume-chan/scrcpy';
 import TelemetryHUD from './TelemetryHUD';
+import GameMappingOverlay from './GameMappingOverlay';
 
 // Helper to convert H.264 Annex B format (start code separated) to AVCC format (4-byte length separated)
 function annexBToAvcc(buffer: Uint8Array): Uint8Array {
@@ -119,6 +124,17 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
   const isMouseDownRef = useRef<boolean>(false);
 
   const [isTelemetryOpen, setIsTelemetryOpen] = useState<boolean>(false);
+  const [isGamepadEnabled, setIsGamepadEnabled] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('adb_game_pad_enabled');
+      return saved === 'true';
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('adb_game_pad_enabled', String(isGamepadEnabled));
+  }, [isGamepadEnabled]);
   const [resolution, setResolution] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const [fps, setFps] = useState<number>(0);
   const [frameCount, setFrameCount] = useState<number>(0);
@@ -950,6 +966,424 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
     }
   };
 
+  // Reusable Action Buttons to prevent code duplication
+  const getButtonClass = (isActive: boolean, type: 'emerald' | 'amber' | 'neutral' | 'red' | 'blue', isFloating: boolean) => {
+    if (isFloating) {
+      const base = "p-1.5 rounded-lg transition-colors border flex items-center justify-center ";
+      if (type === 'emerald') {
+        return base + (isActive ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/30 hover:bg-emerald-900' : 'bg-gray-900/80 text-gray-400 border-gray-700/50 hover:bg-gray-800');
+      } else if (type === 'amber') {
+        return base + (isActive ? 'bg-amber-950/80 text-amber-400 border-amber-900/50 hover:bg-amber-900' : 'bg-emerald-950/80 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900');
+      } else if (type === 'red') {
+        return "p-1.5 bg-gray-900/80 hover:bg-red-950/80 border border-gray-700/50 text-red-400 rounded-lg transition-colors flex items-center justify-center";
+      } else if (type === 'blue') {
+        return "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-blue-400 rounded-lg transition-colors flex items-center justify-center";
+      } else {
+        return "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-lg transition-colors flex items-center justify-center";
+      }
+    } else {
+      const base = "px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ";
+      if (type === 'emerald') {
+        return base + (isActive ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' : 'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 hover:text-gray-200');
+      } else if (type === 'amber') {
+        return base + (isActive ? 'bg-amber-950/40 text-amber-500 border-amber-900/50 hover:bg-amber-900/60' : 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60');
+      } else if (type === 'red') {
+        return "p-2 text-gray-400 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors border border-transparent hover:border-red-900/30 flex items-center justify-center";
+      } else if (type === 'blue') {
+        return "p-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/20 rounded-lg transition-colors flex items-center space-x-1 border border-transparent hover:border-emerald-900/30";
+      } else {
+        return "p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded-lg transition-colors flex items-center justify-center";
+      }
+    }
+  };
+
+  const getRingerButtonClass = (isFloating: boolean) => {
+    if (isFloating) {
+      const base = "p-1.5 rounded-lg transition-colors border flex items-center justify-center ";
+      return base + (
+        ringerMode === 2 ? 'bg-emerald-950/80 text-emerald-400 border-emerald-500/30 hover:bg-emerald-900' :
+        ringerMode === 1 ? 'bg-amber-950/80 text-amber-400 border-amber-500/30 hover:bg-amber-900' :
+        ringerMode === 0 ? 'bg-slate-950/80 text-slate-400 border-slate-700/50 hover:bg-slate-800' :
+        'bg-gray-900/80 text-gray-300 border-gray-700/50 hover:bg-gray-800'
+      );
+    } else {
+      const base = "px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ";
+      return base + (
+        ringerMode === 2 ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' :
+        ringerMode === 1 ? 'bg-amber-950/40 text-amber-500 border-amber-900/50 hover:bg-amber-900/60' :
+        ringerMode === 0 ? 'bg-slate-950/40 text-slate-400 border-slate-900/50 hover:bg-slate-800/60' :
+        'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800'
+      );
+    }
+  };
+
+  const renderScreenPowerBtn = (isFloating: boolean) => {
+    const isActive = !isScreenOff;
+    return (
+      <button
+        onClick={async () => {
+          if (client.controller?.setScreenPowerMode) {
+            try {
+              const newMode = isScreenOff ? 2 : 0;
+              await client.controller.setScreenPowerMode(newMode);
+              setIsScreenOff(!isScreenOff);
+            } catch (e) {
+              console.error('Failed to toggle screen power mode', e);
+            }
+          }
+        }}
+        className={
+          isFloating
+            ? isActive 
+              ? 'p-1.5 rounded-lg transition-colors bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900 flex items-center justify-center'
+              : 'p-1.5 rounded-lg transition-colors bg-red-950/20 text-red-400 border border-red-900/30 hover:bg-red-950/40 flex items-center justify-center'
+            : isActive
+              ? 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60 flex items-center space-x-1.5'
+              : 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-gray-800/50 text-red-400 border-transparent hover:bg-gray-800 flex items-center space-x-1.5'
+        }
+        title="Toggle Physical Device Screen (Keep Mirroring Alive)"
+      >
+        {isActive ? <Smartphone className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        {!isFloating && <span className="hidden sm:inline">{isScreenOff ? "Screen Off" : "Screen On"}</span>}
+      </button>
+    );
+  };
+
+  const renderTelemetryBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => setIsTelemetryOpen(!isTelemetryOpen)}
+      className={
+        isFloating
+          ? isTelemetryOpen
+            ? 'p-1.5 rounded-lg transition-colors bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900 flex items-center justify-center'
+            : 'p-1.5 rounded-lg transition-colors bg-gray-900/80 text-gray-400 border border-gray-700/50 hover:bg-gray-800 flex items-center justify-center'
+          : isTelemetryOpen
+            ? 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60 flex items-center space-x-1.5'
+            : 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 flex items-center space-x-1.5'
+      }
+      title="Toggle Hardware Telemetry HUD"
+    >
+      <Gauge className="w-4 h-4" />
+      {!isFloating && <span className="hidden sm:inline">Telemetry HUD</span>}
+    </button>
+  );
+
+  const renderGamepadBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => setIsGamepadEnabled(!isGamepadEnabled)}
+      className={
+        isFloating
+          ? isGamepadEnabled
+            ? 'p-1.5 rounded-lg transition-colors bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900 flex items-center justify-center'
+            : 'p-1.5 rounded-lg transition-colors bg-gray-900/80 text-gray-400 border border-gray-700/50 hover:bg-gray-800 flex items-center justify-center'
+          : isGamepadEnabled
+            ? 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60 flex items-center space-x-1.5'
+            : 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 flex items-center space-x-1.5'
+      }
+      title="Toggle Gaming Control Mapping Overlay Engine"
+    >
+      <Gamepad className="w-4 h-4" />
+      {!isFloating && <span className="hidden sm:inline">{isGamepadEnabled ? "Game Controls: ON" : "Game Controls: OFF"}</span>}
+    </button>
+  );
+
+  const renderAudioBtn = (isFloating: boolean) => {
+    if (!initialAudioEnabled) return null;
+    const isActive = !isAudioMuted;
+    return (
+      <button
+        onClick={toggleMute}
+        className={
+          isFloating
+            ? isActive
+              ? 'p-1.5 rounded-lg transition-colors bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900 flex items-center justify-center'
+              : 'p-1.5 rounded-lg transition-colors bg-red-950/20 text-red-400 border border-red-900/30 hover:bg-red-950/40 flex items-center justify-center'
+            : isActive
+              ? 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60 flex items-center space-x-1.5'
+              : 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-gray-800/50 text-red-400 border-transparent hover:bg-gray-800 flex items-center space-x-1.5'
+        }
+        title={isAudioMuted ? `Unmute PC Audio (Status: ${audioStatus})` : `Mute PC Audio (Status: ${audioStatus})`}
+      >
+        {isActive ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+        {!isFloating && <span className="hidden sm:inline">{isAudioMuted ? "PC Muted" : "PC Audio Live"}</span>}
+      </button>
+    );
+  };
+
+  const renderRingerBtn = (isFloating: boolean) => !initialAudioEnabled ? null : (
+    <button
+      onClick={() => {
+        const nextMode = ringerMode === 2 ? 1 : ringerMode === 1 ? 0 : 2;
+        handleSetRingerMode(nextMode);
+      }}
+      className={getRingerButtonClass(isFloating)}
+      title={
+        ringerMode === 2 ? "Phone Sound is Normal. Click to set Vibrate." :
+        ringerMode === 1 ? "Phone Sound is Vibrate. Click to set Silent." :
+        ringerMode === 0 ? "Phone Sound is Silent. Click to set Normal." :
+        "Syncing Phone Sound Mode..."
+      }
+    >
+      {ringerMode === 2 ? <Volume2 className="w-4 h-4" /> :
+       ringerMode === 1 ? <Activity className="w-4 h-4" /> :
+       ringerMode === 0 ? <VolumeX className="w-4 h-4" /> :
+       <Smartphone className="w-4 h-4" />}
+      {!isFloating && (
+        <span className="hidden sm:inline">
+          {ringerMode === 2 ? "Phone: Sound" :
+           ringerMode === 1 ? "Phone: Vibrate" :
+           ringerMode === 0 ? "Phone: Silent" :
+           "Phone: Syncing..."}
+        </span>
+      )}
+    </button>
+  );
+
+  const renderSpeakerBtn = (isFloating: boolean) => {
+    if (!initialAudioEnabled) return null;
+    const isUnsupported = !!(sdkVersion && sdkVersion < 30);
+    const isActive = !isDeviceSpeakerMuted && !isUnsupported;
+    return (
+      <button
+        onClick={() => setIsDeviceSpeakerMuted(!isDeviceSpeakerMuted)}
+        className={
+          isFloating
+            ? isUnsupported
+              ? 'p-1.5 rounded-lg bg-gray-900/30 text-gray-600 border border-gray-800/50 cursor-not-allowed flex items-center justify-center'
+              : isActive
+                ? 'p-1.5 rounded-lg transition-colors bg-emerald-950/80 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-900 flex items-center justify-center'
+                : 'p-1.5 rounded-lg transition-colors bg-red-950/20 text-red-400 border border-red-900/30 hover:bg-red-950/40 flex items-center justify-center'
+            : isUnsupported
+              ? 'px-3 py-1.5 text-xs font-medium rounded-lg border bg-gray-800/10 text-gray-500 border-transparent cursor-not-allowed flex items-center space-x-1.5'
+              : isActive
+                ? 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60 flex items-center space-x-1.5'
+                : 'px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border bg-gray-800/50 text-red-400 border-transparent hover:bg-gray-800 flex items-center space-x-1.5'
+        }
+        title={
+          isUnsupported 
+            ? "Audio streaming and hardware speaker control is unsupported below Android 11" 
+            : isDeviceSpeakerMuted 
+              ? "Unmute Physical Phone Speaker (Currently Silent on Phone, Playing on PC)" 
+              : "Mute Physical Phone Speaker (Keep Audio Playing on PC)"
+        }
+        disabled={isUnsupported}
+      >
+        <Speaker className="w-4 h-4" />
+        {!isFloating && (
+          <span className="hidden sm:inline">
+            {isUnsupported 
+              ? "Phone Spk: Unsupported" 
+              : isDeviceSpeakerMuted 
+                ? "Phone Spk: Muted" 
+                : "Phone Spk: Live"}
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  const renderPowerBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('power')}
+      className={getButtonClass(false, 'red', isFloating)}
+      title="Power Button"
+    >
+      <Power className="w-4 h-4" />
+    </button>
+  );
+
+  const renderVolDownBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('volumeDown')}
+      className={getButtonClass(false, 'neutral', isFloating)}
+      title="Volume Down"
+    >
+      <Volume1 className="w-4 h-4" />
+    </button>
+  );
+
+  const renderVolUpBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('volumeUp')}
+      className={getButtonClass(false, 'neutral', isFloating)}
+      title="Volume Up"
+    >
+      <Volume2 className="w-4 h-4" />
+    </button>
+  );
+
+  const renderRotateBtn = (isFloating: boolean) => (
+    <button
+      onClick={handleDeviceRotate}
+      className={getButtonClass(false, 'blue', isFloating)}
+      title="Rotate Device OS"
+    >
+      <RotateCw className="w-4 h-4" />
+      {!isFloating && <span className="hidden sm:inline text-xs text-emerald-400 font-medium ml-1">Rotate OS</span>}
+    </button>
+  );
+
+  const renderLauncherBtn = (isFloating: boolean) => (
+    <button
+      onClick={onOpenLauncher}
+      className={isFloating 
+        ? "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-emerald-400 rounded-lg transition-colors flex items-center justify-center"
+        : "p-2 text-emerald-400 bg-emerald-950/20 hover:bg-emerald-900/40 rounded-lg transition-colors flex items-center space-x-1 border border-emerald-900/30"
+      }
+      title="App Launcher"
+    >
+      <Grid className="w-4 h-4" />
+      {!isFloating && <span className="hidden sm:inline text-xs font-semibold">Launcher</span>}
+    </button>
+  );
+
+  const renderMixerBtn = (isFloating: boolean) => (
+    <div className="relative inline-block self-center">
+      <button
+        onClick={() => {
+          setShowVolumeMixer(!showVolumeMixer);
+          if (!showVolumeMixer) {
+            fetchStreamVolumes();
+            fetchRingerMode().catch(err => console.warn("Failed to fetch ringer mode on open:", err));
+          }
+        }}
+        className={isFloating
+          ? `p-1.5 border rounded-lg transition-all flex items-center justify-center bg-gray-900/80 border-gray-700/50 text-gray-300 hover:bg-gray-800 ${showVolumeMixer ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-400' : ''}`
+          : `px-3 py-1.5 text-xs font-medium border rounded-lg transition-all flex items-center space-x-1.5 bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 ${showVolumeMixer ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50' : ''}`
+        }
+        title="Granular Audio Stream Mixer"
+      >
+        <SlidersHorizontal className="w-4 h-4" />
+        {!isFloating && <span className="text-[10px] font-medium hidden sm:inline">Mixer</span>}
+      </button>
+      {showVolumeMixer && (
+        <div className={`absolute right-0 ${isFloating ? 'top-full mt-2' : 'bottom-full mb-2'} w-72 bg-slate-950/95 backdrop-blur-md border border-slate-800 rounded-xl shadow-2xl p-4 z-50 text-left`}>
+          <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-800/80">
+            <div>
+              <span className="text-xs font-semibold text-slate-100 block">Device Sound Mixer</span>
+              <span className="text-[9px] text-slate-500">Adjust individual audio streams directly</span>
+            </div>
+            <button 
+              onClick={() => {
+                fetchStreamVolumes();
+                fetchRingerMode().catch(err => console.warn("Failed to fetch ringer mode on sync:", err));
+              }}
+              className="text-[10px] font-medium bg-slate-900 hover:bg-slate-800 text-emerald-400 px-2 py-1 rounded border border-slate-800 transition-colors"
+            >
+              Sync
+            </button>
+          </div>
+          
+          <div className="mb-4 bg-slate-900/40 p-2 rounded-lg border border-slate-800/60">
+            <span className="text-[10px] font-semibold text-slate-400 block mb-1.5 uppercase tracking-wider">Sound Mode</span>
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                { mode: 2, label: "Sound", icon: <Volume2 className="w-3.5 h-3.5" /> },
+                { mode: 1, label: "Vibrate", icon: <Activity className="w-3.5 h-3.5" /> },
+                { mode: 0, label: "Silent", icon: <VolumeX className="w-3.5 h-3.5" /> }
+              ].map(item => (
+                <button
+                  key={item.mode}
+                  onClick={() => handleSetRingerMode(item.mode)}
+                  className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-md border text-[10px] font-medium transition-all ${
+                    ringerMode === item.mode 
+                      ? "bg-emerald-950/60 border-emerald-500/50 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.15)]" 
+                      : "bg-slate-950/40 border-slate-800/60 text-slate-400 hover:text-slate-300 hover:border-slate-700/80"
+                  }`}
+                >
+                  {item.icon}
+                  <span className="mt-1 text-[9px]">{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-3.5">
+            {[
+              { id: 3, name: 'Media & Music', desc: 'App sounds, video, scrcpy capture', color: 'accent-emerald-500' },
+              { id: 2, name: 'Ringtone & Calls', desc: 'Incoming phone calls', color: 'accent-indigo-500' },
+              { id: 5, name: 'Notifications', desc: 'Texts and app alerts', color: 'accent-amber-500' },
+              { id: 4, name: 'Alarms', desc: 'Clock alarms', color: 'accent-rose-500' },
+              { id: 1, name: 'System Sounds', desc: 'Touch feedback, lock sounds', color: 'accent-sky-500' },
+            ].map(stream => (
+              <div key={stream.id} className="space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <div>
+                    <span className="font-medium text-slate-300">{stream.name}</span>
+                    <span className="text-[8px] text-slate-500 block leading-tight">{stream.desc}</span>
+                  </div>
+                  <span className="font-mono text-slate-400 font-medium bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800/60 self-start">
+                    {streamVolumes[stream.id] ?? 0} / 15
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="15"
+                  value={streamVolumes[stream.id] ?? 0}
+                  onChange={(e) => handleSetStreamVolume(stream.id, parseInt(e.target.value, 10))}
+                  className={`w-full ${stream.color} h-1.5 bg-slate-900 rounded-lg appearance-none cursor-pointer border border-slate-800`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderBackBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('back')}
+      className={isFloating 
+        ? "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-lg transition-colors flex items-center justify-center"
+        : "px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
+      }
+      title="Back"
+    >
+      <ArrowLeft className={isFloating ? "w-4 h-4" : "w-5 h-5"} />
+    </button>
+  );
+
+  const renderHomeBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('home')}
+      className={isFloating 
+        ? "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-lg transition-colors flex items-center justify-center"
+        : "px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
+      }
+      title="Home"
+    >
+      <Circle className={isFloating ? "w-4 h-4 fill-none" : "w-5 h-5 fill-none"} />
+    </button>
+  );
+
+  const renderRecentsBtn = (isFloating: boolean) => (
+    <button
+      onClick={() => handleNavAction('appSwitch')}
+      className={isFloating 
+        ? "p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-lg transition-colors flex items-center justify-center"
+        : "px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
+      }
+      title="Recents"
+    >
+      <Square className={isFloating ? "w-4 h-4 fill-none" : "w-4 h-4 fill-none"} />
+    </button>
+  );
+
+  const renderDisconnectBtn = (isFloating: boolean) => (
+    <button
+      onClick={onDisconnect}
+      className={isFloating 
+        ? "p-1.5 bg-rose-950/80 hover:bg-rose-900/80 border border-rose-500/30 text-rose-300 rounded-lg transition-colors flex items-center justify-center"
+        : "px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white rounded-lg shadow transition-colors"
+      }
+      title="Disconnect Connection"
+    >
+      {isFloating ? <X className="w-4 h-4" /> : "Disconnect"}
+    </button>
+  );
+
   return (
     <div className="flex flex-col items-center justify-center w-full max-w-4xl mx-auto space-y-4">
       {/* Upper Status HUD */}
@@ -1061,63 +1495,42 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
           </div>
         )}
 
-         {/* Floating Quick Settings inside canvas area */}
-        <div className="absolute top-3 right-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200">
-          <button 
-            onClick={() => setIsTelemetryOpen(!isTelemetryOpen)}
-            className={`p-1.5 border rounded-md transition-colors ${isTelemetryOpen ? 'bg-emerald-900/80 hover:bg-emerald-900 border-emerald-700/50 text-emerald-400' : 'bg-gray-900/80 hover:bg-gray-800 border-gray-700/50 text-gray-300'}`}
-            title="Toggle Hardware Telemetry HUD"
-          >
-            <Gauge className="w-4 h-4" />
-          </button>
+          {/* Floating Quick Settings inside canvas area */}
+        <div className="absolute top-3 right-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200 z-40">
           <button 
             onClick={() => {
               const current = viewRotationRef.current;
               const next = ((current + 90) % 360) as 0 | 90 | 180 | 270;
               setViewRotation(next);
             }}
-            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-emerald-400 rounded-md transition-colors flex items-center space-x-1"
+            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-emerald-400 rounded-md transition-colors flex items-center justify-center"
             title="Rotate View 90°"
           >
             <RotateCw className="w-4 h-4" />
-            <span className="text-[10px] font-semibold px-0.5">{viewRotation}°</span>
           </button>
-          <button 
-            onClick={async () => {
-              if (client.controller?.setScreenPowerMode) {
-                try {
-                  const newMode = isScreenOff ? 2 : 0; // 2 = Normal, 0 = Off
-                  await client.controller.setScreenPowerMode(newMode);
-                  setIsScreenOff(!isScreenOff);
-                } catch (e) {
-                  console.error('Failed to toggle screen power mode', e);
-                }
-              }
-            }}
-            className={`p-1.5 border rounded-md transition-colors ${isScreenOff ? 'bg-emerald-900/80 hover:bg-emerald-800 border-emerald-700/50 text-emerald-400' : 'bg-gray-900/80 hover:bg-gray-800 border-gray-700/50 text-gray-300'}`}
-            title="Turn Phone Screen Off/On"
-          >
-            <Smartphone className="w-4 h-4" />
-          </button>
-          {initialAudioEnabled && (
-            <button
-              onClick={toggleMute}
-              className={`p-1.5 border rounded-md transition-colors ${isAudioMuted ? 'bg-amber-950/80 hover:bg-amber-900 border-amber-700/50 text-amber-400' : 'bg-emerald-950/80 hover:bg-emerald-900 border-emerald-700/50 text-emerald-400'}`}
-              title={isAudioMuted ? `Unmute Audio (Status: ${audioStatus})` : `Mute Audio (Status: ${audioStatus})`}
-            >
-              {isAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-            </button>
-          )}
           <button 
             onClick={() => setScaleMode(prev => prev === 'center' ? 'fit' : prev === 'fit' ? 'stretch' : 'center')}
-            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
-            title="Toggle Aspect Ratio"
+            className={`p-1.5 border rounded-md transition-colors flex items-center justify-center ${
+              scaleMode === 'center' 
+                ? 'bg-gray-900/80 hover:bg-gray-800 border-gray-700/50' 
+                : scaleMode === 'fit' 
+                  ? 'bg-emerald-950/80 border-emerald-500/30' 
+                  : 'bg-sky-950/80 border-sky-500/30'
+            }`}
+            title={`Aspect Ratio: ${scaleMode === 'center' ? 'Center' : scaleMode === 'fit' ? 'Fit' : 'Stretch'}`}
           >
-            {scaleMode === 'center' ? 'Center' : scaleMode === 'fit' ? 'Fit' : 'Stretch'}
+            <Tv className={`w-4 h-4 ${
+              scaleMode === 'center' 
+                ? 'text-slate-400' 
+                : scaleMode === 'fit' 
+                  ? 'text-emerald-400' 
+                  : 'text-sky-400'
+            }`} />
           </button>
           <button 
             onClick={toggleFullscreen}
-            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
+            className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors flex items-center justify-center"
+            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
           >
             {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
@@ -1125,376 +1538,72 @@ export default function ScrcpyViewer({ client, onDisconnect, deviceName, onOpenL
 
         {/* Floating Android System Control Bar for Fullscreen mode */}
         {isFullscreen && (
-          <div className="absolute top-3 left-3 flex space-x-2 opacity-30 hover:opacity-100 transition-opacity duration-200">
-            <button
-              onClick={() => setIsTelemetryOpen(!isTelemetryOpen)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors border flex items-center space-x-1.5 ${isTelemetryOpen ? 'bg-emerald-950/80 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900' : 'bg-gray-900/80 text-gray-300 border-gray-700/50 hover:bg-gray-800'}`}
-              title="Toggle Hardware Telemetry HUD"
-            >
-              <Gauge className="w-4 h-4" />
-              <span className="hidden sm:inline">Telemetry</span>
-            </button>
-            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-            <button
-              onClick={async () => {
-                if (client.controller?.setScreenPowerMode) {
-                  try {
-                    const newMode = isScreenOff ? 2 : 0;
-                    await client.controller.setScreenPowerMode(newMode);
-                    setIsScreenOff(!isScreenOff);
-                  } catch (e) {
-                    console.error('Failed to toggle screen power mode', e);
-                  }
-                }
-              }}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors border flex items-center space-x-1.5 ${isScreenOff ? 'bg-emerald-950/80 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900' : 'bg-gray-900/80 text-gray-300 border-gray-700/50 hover:bg-gray-800'}`}
-              title="Toggle Physical Device Screen (Keep Mirroring Alive)"
-            >
-              <Smartphone className="w-4 h-4" />
-              <span className="hidden sm:inline">{isScreenOff ? "Screen Off" : "Screen On"}</span>
-            </button>
-            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-            {initialAudioEnabled && (
-              <>
-                <button
-                  onClick={toggleMute}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors border flex items-center space-x-1.5 ${isAudioMuted ? 'bg-amber-950/80 text-amber-400 border-amber-900/50 hover:bg-amber-900' : 'bg-emerald-950/80 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900'}`}
-                  title={isAudioMuted ? `Unmute Audio (Status: ${audioStatus})` : `Mute Audio (Status: ${audioStatus})`}
-                >
-                  {isAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                  <span className="hidden sm:inline">{isAudioMuted ? "Muted" : "Audio Live"}</span>
-                </button>
-                <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-              </>
-            )}
-            <button
-              onClick={() => handleNavAction('power')}
-              className="p-1.5 bg-gray-900/80 hover:bg-red-950/80 border border-gray-700/50 text-red-400 rounded-md transition-colors"
-              title="Power Button"
-            >
-              <Power className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => handleNavAction('volumeDown')}
-              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
-              title="Volume Down"
-            >
-              <Volume1 className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => handleNavAction('volumeUp')}
-              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-gray-300 rounded-md transition-colors"
-              title="Volume Up"
-            >
-              <Volume2 className="w-4 h-4" />
-            </button>
-            <div className="relative inline-block self-center">
-              <button
-                onClick={() => {
-                  setShowVolumeMixer(!showVolumeMixer);
-                  if (!showVolumeMixer) {
-                    fetchStreamVolumes();
-                    fetchRingerMode().catch(err => console.warn("Failed to fetch ringer mode on open:", err));
-                  }
-                }}
-                className={`p-1.5 border rounded-md transition-all flex items-center space-x-1 ${showVolumeMixer ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.2)]' : 'bg-gray-900/80 border-gray-700/50 text-gray-300 hover:bg-gray-800 hover:text-white'}`}
-                title="Granular Audio Stream Mixer"
-              >
-                <SlidersHorizontal className="w-4 h-4" />
-                <span className="text-[10px] hidden sm:inline font-medium">Mixer</span>
-              </button>
-              {showVolumeMixer && (
-                <div className="absolute right-0 top-full mt-2 w-72 bg-slate-950/95 backdrop-blur-md border border-slate-800 rounded-xl shadow-2xl p-4 z-50 text-left">
-                  <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-800/80">
-                    <div>
-                      <span className="text-xs font-semibold text-slate-100 block">Device Sound Mixer</span>
-                      <span className="text-[9px] text-slate-500">Adjust individual audio streams directly</span>
-                    </div>
-                    <button 
-                      onClick={() => {
-                        fetchStreamVolumes();
-                        fetchRingerMode().catch(err => console.warn("Failed to fetch ringer mode on sync:", err));
-                      }}
-                      className="text-[10px] font-medium bg-slate-900 hover:bg-slate-800 text-emerald-400 px-2 py-1 rounded border border-slate-800 transition-colors"
-                    >
-                      Sync
-                    </button>
-                  </div>
-                  
-                  {/* Native Android Ringer Sound Mode Controls */}
-                  <div className="mb-4 bg-slate-900/40 p-2 rounded-lg border border-slate-800/60">
-                    <span className="text-[10px] font-semibold text-slate-400 block mb-1.5 uppercase tracking-wider">Sound Mode</span>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {[
-                        { mode: 2, label: "Sound", icon: <Volume2 className="w-3.5 h-3.5" /> },
-                        { mode: 1, label: "Vibrate", icon: <Activity className="w-3.5 h-3.5" /> },
-                        { mode: 0, label: "Silent", icon: <VolumeX className="w-3.5 h-3.5" /> }
-                      ].map(item => (
-                        <button
-                          key={item.mode}
-                          onClick={() => handleSetRingerMode(item.mode)}
-                          className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-md border text-[10px] font-medium transition-all ${
-                            ringerMode === item.mode 
-                              ? "bg-emerald-950/60 border-emerald-500/50 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.15)]" 
-                              : "bg-slate-950/40 border-slate-800/60 text-slate-400 hover:text-slate-300 hover:border-slate-700/80"
-                          }`}
-                        >
-                          {item.icon}
-                          <span className="mt-1 text-[9px]">{item.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-3.5">
-                    {[
-                      { id: 3, name: 'Media & Music', desc: 'App sounds, video, scrcpy capture', color: 'accent-emerald-500' },
-                      { id: 2, name: 'Ringtone & Calls', desc: 'Incoming phone calls', color: 'accent-indigo-500' },
-                      { id: 5, name: 'Notifications', desc: 'Texts and app alerts', color: 'accent-amber-500' },
-                      { id: 4, name: 'Alarms', desc: 'Clock alarms', color: 'accent-rose-500' },
-                      { id: 1, name: 'System Sounds', desc: 'Touch feedback, lock sounds', color: 'accent-sky-500' },
-                    ].map(stream => (
-                      <div key={stream.id} className="space-y-1">
-                        <div className="flex justify-between text-[10px]">
-                          <div>
-                            <span className="font-medium text-slate-300">{stream.name}</span>
-                            <span className="text-[8px] text-slate-500 block leading-tight">{stream.desc}</span>
-                          </div>
-                          <span className="font-mono text-slate-400 font-medium bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800/60 self-start">
-                            {streamVolumes[stream.id] ?? 0} / 15
-                          </span>
-                        </div>
-                        <input
-                          type="range"
-                          min="0"
-                          max="15"
-                          value={streamVolumes[stream.id] ?? 0}
-                          onChange={(e) => handleSetStreamVolume(stream.id, parseInt(e.target.value, 10))}
-                          className={`w-full ${stream.color} h-1.5 bg-slate-900 rounded-lg appearance-none cursor-pointer border border-slate-800`}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-            <button
-              onClick={handleDeviceRotate}
-              className="p-1.5 bg-gray-900/80 hover:bg-gray-800 border border-gray-700/50 text-blue-400 rounded-md transition-colors flex items-center"
-              title="Rotate Device UI"
-            >
-              <RotateCw className="w-4 h-4" />
-            </button>
-            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-            <button
-              onClick={() => handleNavAction('back')}
-              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
-              title="Back"
-            >
-              <ArrowLeft className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => handleNavAction('home')}
-              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
-              title="Home"
-            >
-              <Circle className="w-4 h-4 fill-none" />
-            </button>
-            <button
-              onClick={() => handleNavAction('appSwitch')}
-              className="p-1.5 bg-gray-900/80 hover:bg-emerald-950/80 border border-gray-700/50 text-emerald-400 rounded-md transition-colors"
-              title="Recents"
-            >
-              <Square className="w-4 h-4 fill-none" />
-            </button>
-            <div className="w-px h-6 bg-gray-700/50 self-center mx-1" />
-            <button
-              onClick={onDisconnect}
-              className="px-2 py-1.5 text-[10px] font-semibold bg-rose-900/80 hover:bg-rose-800/80 border border-rose-700/50 text-rose-200 rounded-md transition-colors"
-            >
-              Disconnect
-            </button>
+          <div className="absolute top-3 left-3 flex flex-wrap gap-1.5 max-w-[90vw] p-1.5 bg-slate-950/80 backdrop-blur-sm border border-slate-800/80 rounded-xl shadow-2xl opacity-30 hover:opacity-100 transition-opacity duration-200 z-40">
+            {renderTelemetryBtn(true)}
+            {renderScreenPowerBtn(true)}
+            {renderGamepadBtn(true)}
+            {renderAudioBtn(true)}
+            {renderRingerBtn(true)}
+            {renderSpeakerBtn(true)}
+            {renderMixerBtn(true)}
+            {renderLauncherBtn(true)}
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-0.5" />
+            {renderPowerBtn(true)}
+            {renderVolDownBtn(true)}
+            {renderVolUpBtn(true)}
+            {renderRotateBtn(true)}
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-0.5" />
+            {renderBackBtn(true)}
+            {renderHomeBtn(true)}
+            {renderRecentsBtn(true)}
+            <div className="w-px h-6 bg-gray-700/50 self-center mx-0.5" />
+            {renderDisconnectBtn(true)}
           </div>
         )}
       </div>
 
       {/* Primary Android Navigation & Quick Controller Bar */}
-      <div className="flex items-center justify-between w-full px-6 py-3 bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
-        {/* Left Actions - Power/Volume/Rotation */}
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={async () => {
-              if (client.controller?.setScreenPowerMode) {
-                try {
-                  const newMode = isScreenOff ? 2 : 0;
-                  await client.controller.setScreenPowerMode(newMode);
-                  setIsScreenOff(!isScreenOff);
-                } catch (e) {
-                  console.error('Failed to toggle screen power mode', e);
-                }
-              }
-            }}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${isScreenOff ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' : 'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 hover:text-gray-200'}`}
-            title="Toggle Physical Device Screen (Keep Mirroring Alive)"
-          >
-            <Smartphone className="w-4 h-4" />
-            <span className="hidden sm:inline">{isScreenOff ? "Screen Off" : "Screen On"}</span>
-          </button>
-          <div className="w-px h-6 bg-gray-800 mx-1" />
-          <button
-            onClick={() => setIsTelemetryOpen(!isTelemetryOpen)}
-            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${isTelemetryOpen ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' : 'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800 hover:text-gray-200'}`}
-            title="Toggle Hardware Telemetry HUD"
-          >
-            <Gauge className="w-4 h-4" />
-            <span className="hidden sm:inline">Telemetry HUD</span>
-          </button>
-          <div className="w-px h-6 bg-gray-800 mx-1" />
-          {initialAudioEnabled && (
-            <>
-              <button
-                onClick={toggleMute}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${isAudioMuted ? 'bg-amber-950/40 text-amber-500 border-amber-900/50 hover:bg-amber-900/60' : 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60'}`}
-                title={isAudioMuted ? `Unmute PC Audio (Status: ${audioStatus})` : `Mute PC Audio (Status: ${audioStatus})`}
-              >
-                {isAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                <span className="hidden sm:inline">
-                  {isAudioMuted ? "PC Audio Muted" : `PC Audio Live (${audioStatus})`}
-                </span>
-              </button>
-              <div className="w-px h-6 bg-gray-800 mx-1" />
-              <button
-                onClick={() => {
-                  const nextMode = ringerMode === 2 ? 1 : ringerMode === 1 ? 0 : 2;
-                  handleSetRingerMode(nextMode);
-                }}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${
-                  ringerMode === 2 ? 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60' :
-                  ringerMode === 1 ? 'bg-amber-950/40 text-amber-500 border-amber-900/50 hover:bg-amber-900/60' :
-                  ringerMode === 0 ? 'bg-slate-950/40 text-slate-400 border-slate-900/50 hover:bg-slate-800/60' :
-                  'bg-gray-800/50 text-gray-400 border-transparent hover:bg-gray-800'
-                }`}
-                title={
-                  ringerMode === 2 ? "Phone Sound is Normal. Click to set Vibrate." :
-                  ringerMode === 1 ? "Phone Sound is Vibrate. Click to set Silent." :
-                  ringerMode === 0 ? "Phone Sound is Silent. Click to set Normal." :
-                  "Syncing Phone Sound Mode..."
-                }
-              >
-                {ringerMode === 2 ? <Volume2 className="w-4 h-4" /> :
-                 ringerMode === 1 ? <Activity className="w-4 h-4 animate-pulse" /> :
-                 ringerMode === 0 ? <VolumeX className="w-4 h-4" /> :
-                 <Smartphone className="w-4 h-4" />}
-                <span className="hidden sm:inline">
-                  {ringerMode === 2 ? "Phone: Sound" :
-                   ringerMode === 1 ? "Phone: Vibrate" :
-                   ringerMode === 0 ? "Phone: Silent" :
-                   "Phone: Syncing..."}
-                </span>
-              </button>
-              <div className="w-px h-6 bg-gray-800 mx-1" />
-              <button
-                onClick={() => setIsDeviceSpeakerMuted(!isDeviceSpeakerMuted)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors border flex items-center space-x-1.5 ${
-                  isDeviceSpeakerMuted 
-                    ? 'bg-amber-950/40 text-amber-500 border-amber-900/50 hover:bg-amber-900/60' 
-                    : 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/60'
-                }`}
-                title={
-                  sdkVersion && sdkVersion < 30 
-                    ? "Audio streaming and hardware speaker control is unsupported below Android 11" 
-                    : isDeviceSpeakerMuted 
-                      ? "Unmute Physical Phone Speaker (Currently Silent on Phone, Playing on PC)" 
-                      : "Mute Physical Phone Speaker (Keep Audio Playing on PC)"
-                }
-                disabled={!!(sdkVersion && sdkVersion < 30)}
-              >
-                <Smartphone className="w-4 h-4" />
-                <span className="hidden sm:inline">
-                  {sdkVersion && sdkVersion < 30 
-                    ? "Phone Spk: Unsupported" 
-                    : isDeviceSpeakerMuted 
-                      ? "Phone Spk: Muted" 
-                      : "Phone Spk: Live"}
-                </span>
-              </button>
-              <div className="w-px h-6 bg-gray-800 mx-1" />
-            </>
-          )}
-          <button
-            onClick={() => handleNavAction('power')}
-            className="p-2 text-gray-400 hover:text-red-400 hover:bg-red-950/20 rounded-lg transition-colors border border-transparent hover:border-red-900/30"
-            title="Power Button"
-          >
-            <Power className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => handleNavAction('volumeDown')}
-            className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded-lg transition-colors"
-            title="Volume Down"
-          >
-            <Volume1 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => handleNavAction('volumeUp')}
-            className="p-2 text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded-lg transition-colors"
-            title="Volume Up"
-          >
-            <Volume2 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleDeviceRotate}
-            className="p-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/20 rounded-lg transition-colors flex items-center space-x-1 border border-transparent hover:border-emerald-900/30"
-            title="Rotate Device OS"
-          >
-            <RotateCw className="w-4 h-4" />
-          </button>
-          <div className="w-px h-6 bg-gray-800 mx-2" />
-          <button
-            onClick={onOpenLauncher}
-            className="p-2 text-emerald-400 bg-emerald-950/20 hover:bg-emerald-900/40 rounded-lg transition-colors flex items-center space-x-1 border border-emerald-900/30"
-            title="App Launcher"
-          >
-            <Grid className="w-4 h-4" />
-          </button>
+      <div className="flex flex-col lg:flex-row items-center justify-between w-full p-4 gap-4 bg-gray-900 border border-gray-800 rounded-xl shadow-lg">
+        {/* Left Actions - Power/Volume/Rotation/Launcher */}
+        <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2">
+          {renderScreenPowerBtn(false)}
+          {renderTelemetryBtn(false)}
+          {renderGamepadBtn(false)}
+          {renderAudioBtn(false)}
+          {renderRingerBtn(false)}
+          {renderSpeakerBtn(false)}
+          {renderMixerBtn(false)}
+          <div className="w-px h-6 bg-gray-800 hidden md:block mx-1" />
+          {renderPowerBtn(false)}
+          {renderVolDownBtn(false)}
+          {renderVolUpBtn(false)}
+          {renderRotateBtn(false)}
+          <div className="w-px h-6 bg-gray-800 hidden md:block mx-1" />
+          {renderLauncherBtn(false)}
         </div>
 
         {/* Center Navigation - Android System Bar */}
         <div className="flex items-center space-x-6">
-          <button
-            onClick={() => handleNavAction('back')}
-            className="px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
-            title="Back Button"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <button
-            onClick={() => handleNavAction('home')}
-            className="px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
-            title="Home Button"
-          >
-            <Circle className="w-5 h-5 fill-none" />
-          </button>
-          <button
-            onClick={() => handleNavAction('appSwitch')}
-            className="px-4 py-2 text-gray-400 hover:text-emerald-400 hover:bg-emerald-950/10 rounded-lg transition-colors flex items-center justify-center border border-transparent hover:border-emerald-900/20"
-            title="Recents Button"
-          >
-            <Square className="w-4 h-4 fill-none" />
-          </button>
+          {renderBackBtn(false)}
+          {renderHomeBtn(false)}
+          {renderRecentsBtn(false)}
         </div>
 
         {/* Right Action - Disconnect */}
-        <div>
-          <button
-            onClick={onDisconnect}
-            className="px-4 py-2 text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white rounded-lg shadow transition-colors"
-          >
-            Disconnect
-          </button>
+        <div className="flex items-center space-x-2">
+          {renderDisconnectBtn(false)}
         </div>
       </div>
+
+      {/* Gaming Control Mapping Engine Overlay Panel */}
+      {isGamepadEnabled && (
+        <GameMappingOverlay 
+          client={client} 
+          canvasRef={canvasRef} 
+          containerRef={containerRef} 
+          viewRotation={viewRotation} 
+        />
+      )}
     </div>
   );
 }
