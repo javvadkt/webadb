@@ -14,7 +14,11 @@ import {
   ExternalLink,
   Search,
   X,
-  Play
+  Play,
+  Globe,
+  Wifi,
+  Terminal,
+  Key
 } from 'lucide-react';
 import { AdbManager, ConnectionState, ScrcpySettings } from './utils/adbManager';
 import ScrcpyViewer from './components/ScrcpyViewer';
@@ -26,6 +30,47 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>({ status: 'idle' });
   const [pairedDevices, setPairedDevices] = useState<AdbWebUsbBackend[]>([]);
   const [scrcpyClient, setScrcpyClient] = useState<AdbScrcpyClient<any> | null>(null);
+
+  const [connectionType, setConnectionType] = useState<'usb' | 'remote'>('usb');
+  const [remoteUrl, setRemoteUrl] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('adb_remote_url') || 'wss://your-relay-app.onrender.com/client';
+    }
+    return 'wss://your-relay-app.onrender.com/client';
+  });
+  const [remoteToken, setRemoteToken] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('adb_remote_token') || '';
+    }
+    return '';
+  });
+
+  const handleConnectRemote = async () => {
+    if (!remoteUrl.trim()) return;
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('adb_remote_url', remoteUrl.trim());
+        localStorage.setItem('adb_remote_token', remoteToken.trim());
+      }
+      
+      let fullUrl = remoteUrl.trim();
+      if (remoteToken.trim() && !fullUrl.includes('token=')) {
+        const separator = fullUrl.includes('?') ? '&' : '?';
+        fullUrl = `${fullUrl}${separator}token=${encodeURIComponent(remoteToken.trim())}`;
+      }
+
+      const client = await manager.connectRemote(fullUrl, (state) => {
+        setConnectionState(state);
+      }, settings);
+      setScrcpyClient(client);
+    } catch (err: any) {
+      console.error("Remote WebSocket connection workflow failed:", err);
+      setConnectionState({
+        status: 'disconnected',
+        error: err?.message || String(err),
+      });
+    }
+  };
 
   const [showAppLauncher, setShowAppLauncher] = useState<boolean>(false);
   const [installedApps, setInstalledApps] = useState<string[]>([]);
@@ -124,6 +169,14 @@ export default function App() {
     setConnectionState({ status: 'idle' });
     setShowAppLauncher(false);
     loadPairedDevices();
+  };
+
+  const handleRetryConnection = () => {
+    if (connectionType === 'usb') {
+      handleRequestAndConnect();
+    } else {
+      handleConnectRemote();
+    }
   };
 
   const handleOpenLauncher = async () => {
@@ -373,46 +426,150 @@ export default function App() {
             </div>
 
             {/* Right column - Connection Panel */}
-            <div className="md:col-span-2 flex flex-col justify-center items-center p-8 bg-gray-900/40 border border-gray-800/60 rounded-2xl text-center">
-              <div className="w-16 h-16 bg-emerald-950/30 border border-emerald-500/20 rounded-2xl flex items-center justify-center text-emerald-400 mb-6">
-                <Usb className="w-8 h-8" />
+            <div className="md:col-span-2 flex flex-col justify-start items-center p-8 bg-gray-900/40 border border-gray-800/60 rounded-2xl min-h-[480px]">
+              
+              {/* Tab Selector */}
+              <div className="flex bg-gray-950 p-1 rounded-xl mb-8 border border-gray-800/40 w-full max-w-sm">
+                <button
+                  onClick={() => setConnectionType('usb')}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    connectionType === 'usb'
+                      ? 'bg-emerald-600/10 text-emerald-400 border border-emerald-500/20 shadow-sm shadow-emerald-950'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-900/50 border border-transparent'
+                  }`}
+                >
+                  <Usb className="w-3.5 h-3.5" />
+                  <span>Wired (WebUSB)</span>
+                </button>
+                <button
+                  onClick={() => setConnectionType('remote')}
+                  className={`flex-1 flex items-center justify-center space-x-2 py-2 text-xs font-semibold rounded-lg transition-all ${
+                    connectionType === 'remote'
+                      ? 'bg-emerald-600/10 text-emerald-400 border border-emerald-500/20 shadow-sm shadow-emerald-950'
+                      : 'text-gray-400 hover:text-gray-200 hover:bg-gray-900/50 border border-transparent'
+                  }`}
+                >
+                  <Wifi className="w-3.5 h-3.5" />
+                  <span>Remote (WebSocket)</span>
+                </button>
               </div>
-              <h3 className="text-lg font-bold text-gray-200 mb-2">Connect Your Android Device</h3>
-              <p className="text-xs text-gray-500 max-w-sm mb-6 leading-relaxed">
-                Unlock high-performance screen mirroring and low-latency interaction directly over USB. No apps, no drivers, and no servers required.
-              </p>
 
-              <button
-                onClick={handleRequestAndConnect}
-                className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl shadow-lg shadow-emerald-900/20 hover:shadow-emerald-900/30 transition-all flex items-center space-x-2 text-sm"
-              >
-                <Usb className="w-4 h-4" />
-                <span>Connect Android Device</span>
-              </button>
-
-              {/* Paired devices list */}
-              {pairedDevices.length > 0 && (
-                <div className="w-full max-w-sm mt-8 border-t border-gray-800/80 pt-6">
-                  <div className="flex items-center justify-between text-xs text-gray-500 mb-3">
-                    <span>Already Paired Devices</span>
-                    <button onClick={loadPairedDevices} className="text-emerald-400 hover:underline flex items-center">
-                      <RefreshCw className="w-3 h-3 mr-1" /> Refresh
-                    </button>
+              {connectionType === 'usb' ? (
+                <div className="flex flex-col items-center text-center w-full">
+                  <div className="w-16 h-16 bg-emerald-950/30 border border-emerald-500/20 rounded-2xl flex items-center justify-center text-emerald-400 mb-6">
+                    <Usb className="w-8 h-8" />
                   </div>
-                  <div className="space-y-2">
-                    {pairedDevices.map((device, idx) => (
-                      <button
-                        key={idx}
-                        onClick={() => handleConnectDevice(device)}
-                        className="w-full flex items-center justify-between p-3 bg-gray-950/60 hover:bg-gray-800 border border-gray-800 hover:border-gray-700 rounded-xl transition-all text-left group"
-                      >
-                        <div className="flex items-center space-x-3">
-                          <Smartphone className="w-4 h-4 text-emerald-400" />
-                          <span className="text-xs font-semibold text-gray-300">{device.name || "Android Device"}</span>
-                        </div>
-                        <CheckCircle2 className="w-3.5 h-3.5 text-gray-600 group-hover:text-emerald-400 transition-colors" />
-                      </button>
-                    ))}
+                  <h3 className="text-lg font-bold text-gray-200 mb-2">Connect Your Android Device</h3>
+                  <p className="text-xs text-gray-500 max-w-sm mb-6 leading-relaxed">
+                    Unlock high-performance screen mirroring and low-latency interaction directly over USB. No apps, no drivers, and no servers required.
+                  </p>
+
+                  <button
+                    onClick={handleRequestAndConnect}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl shadow-lg shadow-emerald-900/20 hover:shadow-emerald-900/30 transition-all flex items-center space-x-2 text-sm"
+                  >
+                    <Usb className="w-4 h-4" />
+                    <span>Connect Android Device</span>
+                  </button>
+
+                  {/* Paired devices list */}
+                  {pairedDevices.length > 0 && (
+                    <div className="w-full max-w-sm mt-8 border-t border-gray-800/80 pt-6">
+                      <div className="flex items-center justify-between text-xs text-gray-500 mb-3">
+                        <span>Already Paired Devices</span>
+                        <button onClick={loadPairedDevices} className="text-emerald-400 hover:underline flex items-center">
+                          <RefreshCw className="w-3 h-3 mr-1" /> Refresh
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {pairedDevices.map((device, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => handleConnectDevice(device)}
+                            className="w-full flex items-center justify-between p-3 bg-gray-950/60 hover:bg-gray-800 border border-gray-800 hover:border-gray-700 rounded-xl transition-all text-left group"
+                          >
+                            <div className="flex items-center space-x-3">
+                              <Smartphone className="w-4 h-4 text-emerald-400" />
+                              <span className="text-xs font-semibold text-gray-300">{device.name || "Android Device"}</span>
+                            </div>
+                            <CheckCircle2 className="w-3.5 h-3.5 text-gray-600 group-hover:text-emerald-400 transition-colors" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col items-center w-full">
+                  <div className="w-16 h-16 bg-emerald-950/30 border border-emerald-500/20 rounded-2xl flex items-center justify-center text-emerald-400 mb-6">
+                    <Wifi className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-200 mb-2">Remote WebSocket Connection</h3>
+                  <p className="text-xs text-gray-500 max-w-sm mb-6 leading-relaxed text-center">
+                    Establish a low-latency mirror stream from a remote device connected to a free Render/Railway server relay channel.
+                  </p>
+
+                  <div className="w-full max-w-md bg-gray-950/50 border border-gray-800/80 p-5 rounded-xl mb-6 text-left animate-fade-in space-y-4">
+                    <div>
+                      <label className="text-xs font-medium text-gray-400 block mb-1.5">ADB WebSocket Relay URL</label>
+                      <div className="relative">
+                        <Terminal className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+                        <input
+                          type="text"
+                          value={remoteUrl}
+                          onChange={(e) => setRemoteUrl(e.target.value)}
+                          placeholder="wss://adbcloud.onrender.com/client"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-4 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500 transition-colors font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-xs font-medium text-gray-400">Access Token / Password (Optional)</label>
+                        <span className="text-[9px] text-gray-500 font-mono">?token=...</span>
+                      </div>
+                      <div className="relative">
+                        <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+                        <input
+                          type="password"
+                          value={remoteToken}
+                          onChange={(e) => setRemoteToken(e.target.value)}
+                          placeholder="MyUltraSecureADBAccess2026"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-4 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500 transition-colors font-mono"
+                        />
+                      </div>
+                      <p className="text-[9px] text-gray-600 mt-1.5">
+                        If provided, it will automatically append as <span className="font-mono text-gray-500">?token=VALUE</span> to the server connection URL.
+                      </p>
+                    </div>
+
+                    <div className="border-t border-gray-800/60 pt-3">
+                      <p className="text-[10px] text-gray-600 leading-normal">
+                        Ensure your remote device is connected to a machine running the relay client agent pointing to this server.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleConnectRemote}
+                    disabled={!remoteUrl.trim()}
+                    className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold rounded-xl shadow-lg shadow-emerald-900/20 hover:shadow-emerald-900/30 transition-all flex items-center space-x-2 text-sm"
+                  >
+                    <Wifi className="w-4 h-4" />
+                    <span>Connect Remote Device</span>
+                  </button>
+
+                  <div className="w-full max-w-sm mt-6 pt-5 border-t border-gray-800/80">
+                    <div className="flex items-start space-x-2.5 text-left">
+                      <Globe className="w-3.5 h-3.5 text-emerald-500 mt-0.5 shrink-0" />
+                      <div>
+                        <h4 className="text-[11px] font-bold text-gray-400">Zero Local Dependencies</h4>
+                        <p className="text-[10px] text-gray-500 leading-normal">
+                          The client receives the ADB packets, and Tango ADB handles standard security handshakes, server injection, and low-latency video decoding natively in your browser!
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
@@ -439,7 +596,11 @@ export default function App() {
             
             {/* Timeline progress mapping */}
             <p className="text-xs text-gray-500 mt-2 min-h-[32px] px-4 leading-relaxed">
-              {connectionState.status === 'connecting' && "Requesting USB transport claiming. Please wait..."}
+              {connectionState.status === 'connecting' && (
+                connectionType === 'usb' 
+                  ? "Requesting USB transport claiming. Please wait..." 
+                  : "Establishing WebSocket connection to remote cloud relay..."
+              )}
               {connectionState.status === 'authenticating' && "Awaiting cryptographic approval. LOOK AT YOUR PHONE screen and tap \"Allow USB debugging\"!"}
               {connectionState.status === 'connected' && "ADB security channel established successfully."}
               {connectionState.status === 'pushing_server' && "Uploading high-speed Scrcpy server binary to /data/local/tmp..."}
@@ -524,7 +685,7 @@ export default function App() {
 
             <div className="mt-6 flex flex-col space-y-2">
               <button
-                onClick={handleRequestAndConnect}
+                onClick={handleRetryConnection}
                 className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-xl text-xs shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center space-x-2"
               >
                 <RefreshCw className="w-3.5 h-3.5" />

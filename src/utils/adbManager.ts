@@ -1,7 +1,7 @@
 import { Adb, AdbCredentialStore, AdbPrivateKey, AdbDaemonTransport } from '@yume-chan/adb';
 import { AdbWebUsbBackend, AdbWebUsbBackendManager } from '@yume-chan/adb-backend-webusb';
 import { AdbScrcpyClient, AdbScrcpyOptionsLatest } from '@yume-chan/adb-scrcpy';
-import { Consumable, ReadableStream } from '@yume-chan/stream-extra';
+import { Consumable, ReadableStream, WritableStream } from '@yume-chan/stream-extra';
 
 // Local storage credential store for ADB authorization keys
 export class LocalStorageAdbCredentialStore implements AdbCredentialStore {
@@ -67,6 +67,7 @@ export class AdbManager {
   private adb: Adb | null = null;
   private scrcpyClient: AdbScrcpyClient<any> | null = null;
   private backend: AdbWebUsbBackend | null = null;
+  private socket: WebSocket | null = null;
 
   async getPairedDevices(): Promise<AdbWebUsbBackend[]> {
     if (typeof window === 'undefined' || !navigator.usb || !AdbWebUsbBackendManager.BROWSER) return [];
@@ -109,90 +110,11 @@ export class AdbManager {
       });
       this.adb = new Adb(transport);
 
-      onStateChange({ status: 'connected', deviceName: backend.name });
-
-      // Step 2: Push scrcpy-server.jar
-      onStateChange({ status: 'pushing_server', deviceName: backend.name });
-      
-      let serverBytes: Uint8Array;
-      try {
-        // Fetch via our Next.js API route proxy to avoid CORS issues from Github
-        const response = await fetch('/api/scrcpy?v=3.3.3');
-        if (!response.ok) {
-          throw new Error(`Failed to fetch proxy server: ${response.status}`);
-        }
-        serverBytes = new Uint8Array(await response.arrayBuffer());
-      } catch (err) {
-        console.warn("Could not load scrcpy-server from API proxy", err);
-        throw new Error("Could not download scrcpy-server for injection. Please check internet connection.");
-      }
-
-      // Push to /data/local/tmp/scrcpy-server.jar
-      const sync = await this.adb.sync();
-      try {
-        await sync.write({
-          filename: '/data/local/tmp/scrcpy-server.jar',
-          file: new ReadableStream<Consumable<Uint8Array>>({
-            start(controller) {
-              controller.enqueue(new Consumable(serverBytes));
-              controller.close();
-            }
-          }),
-        });
-      } finally {
-        await sync.dispose();
-      }
-
-      // Step 3: Start Scrcpy Server
-      onStateChange({ status: 'starting_server', deviceName: backend.name });
-
-      // Instantiate options for scrcpy (compatible with v3.3)
-      const options = new AdbScrcpyOptionsLatest(
-        AdbScrcpyOptionsLatest.Defaults
-      );
-      // Override specific defaults for performance and compatibility (especially Moto G85 / Android 14+)
-      options.value.logLevel = "debug";
-      options.value.videoCodec = "h264";
-      options.value.videoBitRate = settings?.videoBitRate ?? 2000000;
-      options.value.maxSize = settings?.maxSize ?? 800;
-      options.value.maxFps = settings?.maxFps ?? 30;
-      options.value.audio = settings?.audio ?? true;
-      (options.value as any).audioSource = "playback";
-      options.value.tunnelForward = settings?.tunnelForward ?? true;
-      (options.value as any).turnScreenOff = settings?.turnScreenOff ?? false;
-      options.value.displayId = 0; // Force main display to fix Motorola "Ready For" bug
-      options.value.clipboardAutosync = false; // Disable clipboard sync for Android 14 security
-
-      this.scrcpyClient = await AdbScrcpyClient.start(
-        this.adb,
-        '/data/local/tmp/scrcpy-server.jar',
-        options
-      );
-
-      // Consume and log the scrcpy server output so we can see any encoder errors on the device
-      if (this.scrcpyClient.output) {
-        this.scrcpyClient.output.pipeTo(new WritableStream({
-          write(chunk) {
-            console.log('[scrcpy-server]', chunk);
-          }
-        }) as any).catch((e) => {
-          console.warn('scrcpy-server output stream closed', e);
-        });
-      }
-
-      onStateChange({ status: 'active', deviceName: backend.name });
-      return this.scrcpyClient;
+      return await this.startScrcpySession(backend.name, onStateChange, settings);
 
     } catch (error: any) {
-      console.error("Scrcpy failed to start. Full details:", error);
-      
-      // If the error contains server output lines, print them out clearly
-      if (error.output) {
-        console.error("Android Server Log:", error.output.join('\n'));
-      }
-      
+      console.error("WebUSB connection failed:", error);
       const errorMessage = error.output ? error.output.join(' | ') : (error?.message || String(error));
-      
       onStateChange({
         status: 'disconnected',
         error: errorMessage,
@@ -200,6 +122,175 @@ export class AdbManager {
       await this.disconnect();
       throw error;
     }
+  }
+
+  async connectRemote(
+    wsUrl: string,
+    onStateChange: (state: ConnectionState) => void,
+    settings?: ScrcpySettings
+  ): Promise<AdbScrcpyClient<any>> {
+    try {
+      onStateChange({ status: 'connecting', deviceName: 'Remote Device' });
+
+      const socket = await new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        const timeout = setTimeout(() => {
+          ws.close();
+          reject(new Error("Connection to remote relay server timed out after 10 seconds."));
+        }, 10000);
+
+        ws.onopen = () => {
+          clearTimeout(timeout);
+          resolve(ws);
+        };
+
+        ws.onerror = () => {
+          clearTimeout(timeout);
+          reject(new Error("Failed to connect to the remote WebSocket relay server. Please check your URL and server status."));
+        };
+      });
+
+      this.socket = socket;
+
+      const readable = new ReadableStream<Uint8Array>({
+        start(controller) {
+          socket.onmessage = (event) => {
+            controller.enqueue(new Uint8Array(event.data));
+          };
+          socket.onclose = () => {
+            try {
+              controller.close();
+            } catch (e) {}
+          };
+          socket.onerror = (err) => {
+            try {
+              controller.error(err);
+            } catch (e) {}
+          };
+        },
+        cancel() {
+          socket.close();
+        }
+      });
+
+      const writable = new WritableStream<Uint8Array>({
+        write(chunk) {
+          socket.send(chunk);
+        },
+        close() {
+          socket.close();
+        },
+        abort() {
+          socket.close();
+        }
+      });
+
+      onStateChange({ status: 'authenticating', deviceName: 'Remote Device' });
+
+      const credentialStore = new LocalStorageAdbCredentialStore();
+      const transport = await AdbDaemonTransport.authenticate({
+        serial: 'remote-device',
+        connection: { readable, writable } as any,
+        credentialStore,
+      });
+      this.adb = new Adb(transport);
+
+      return await this.startScrcpySession('Remote Device', onStateChange, settings);
+
+    } catch (error: any) {
+      console.error("Remote WebSocket connection failed:", error);
+      const errorMessage = error.output ? error.output.join(' | ') : (error?.message || String(error));
+      onStateChange({
+        status: 'disconnected',
+        error: errorMessage,
+      });
+      await this.disconnect();
+      throw error;
+    }
+  }
+
+  private async startScrcpySession(
+    deviceName: string,
+    onStateChange: (state: ConnectionState) => void,
+    settings?: ScrcpySettings
+  ): Promise<AdbScrcpyClient<any>> {
+    // Step 2: Push scrcpy-server.jar
+    onStateChange({ status: 'pushing_server', deviceName });
+    
+    let serverBytes: Uint8Array;
+    try {
+      // Fetch via our Next.js API route proxy to avoid CORS issues from Github
+      const response = await fetch('/api/scrcpy?v=3.3.3');
+      if (!response.ok) {
+        throw new Error(`Failed to fetch proxy server: ${response.status}`);
+      }
+      serverBytes = new Uint8Array(await response.arrayBuffer());
+    } catch (err) {
+      console.warn("Could not load scrcpy-server from API proxy", err);
+      throw new Error("Could not download scrcpy-server for injection. Please check internet connection.");
+    }
+
+    if (!this.adb) {
+      throw new Error("ADB connection is not active.");
+    }
+
+    // Push to /data/local/tmp/scrcpy-server.jar
+    const sync = await this.adb.sync();
+    try {
+      await sync.write({
+        filename: '/data/local/tmp/scrcpy-server.jar',
+        file: new ReadableStream<Consumable<Uint8Array>>({
+          start(controller) {
+            controller.enqueue(new Consumable(serverBytes));
+            controller.close();
+          }
+        }),
+      });
+    } finally {
+      await sync.dispose();
+    }
+
+    // Step 3: Start Scrcpy Server
+    onStateChange({ status: 'starting_server', deviceName });
+
+    // Instantiate options for scrcpy (compatible with v3.3)
+    const options = new AdbScrcpyOptionsLatest(
+      AdbScrcpyOptionsLatest.Defaults
+    );
+    // Override specific defaults for performance and compatibility (especially Moto G85 / Android 14+)
+    options.value.logLevel = "debug";
+    options.value.videoCodec = "h264";
+    options.value.videoBitRate = settings?.videoBitRate ?? 2000000;
+    options.value.maxSize = settings?.maxSize ?? 800;
+    options.value.maxFps = settings?.maxFps ?? 30;
+    options.value.audio = settings?.audio ?? true;
+    (options.value as any).audioSource = "playback";
+    options.value.tunnelForward = settings?.tunnelForward ?? true;
+    (options.value as any).turnScreenOff = settings?.turnScreenOff ?? false;
+    options.value.displayId = 0; // Force main display to fix Motorola "Ready For" bug
+    options.value.clipboardAutosync = false; // Disable clipboard sync for Android 14 security
+
+    this.scrcpyClient = await AdbScrcpyClient.start(
+      this.adb,
+      '/data/local/tmp/scrcpy-server.jar',
+      options
+    );
+
+    // Consume and log the scrcpy server output so we can see any encoder errors on the device
+    if (this.scrcpyClient.output) {
+      this.scrcpyClient.output.pipeTo(new WritableStream({
+        write(chunk) {
+          console.log('[scrcpy-server]', chunk);
+        }
+      }) as any).catch((e) => {
+        console.warn('scrcpy-server output stream closed', e);
+      });
+    }
+
+    onStateChange({ status: 'active', deviceName });
+    return this.scrcpyClient;
   }
 
   async disconnect() {
@@ -228,6 +319,16 @@ export class AdbManager {
         }
       }
       this.backend = null;
+
+      // Close the WebSocket connection if it exists
+      if (this.socket) {
+        try {
+          this.socket.close();
+        } catch (socketError) {
+          console.warn("Failed to close remote WebSocket:", socketError);
+        }
+        this.socket = null;
+      }
     } catch (e) {
       console.error("Error during disconnect:", e);
     }
