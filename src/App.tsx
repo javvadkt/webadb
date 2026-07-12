@@ -44,22 +44,23 @@ export default function App() {
     }
     return '';
   });
+  const [authToken, setAuthToken] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('adb_auth_token') || localStorage.getItem('adb_remote_token') || '';
+    }
+    return '';
+  });
 
   const handleConnectRemote = async () => {
-    if (!remoteUrl.trim()) return;
     try {
       if (typeof window !== 'undefined') {
-        localStorage.setItem('adb_remote_url', remoteUrl.trim());
-        localStorage.setItem('adb_remote_token', remoteToken.trim());
+        localStorage.setItem('adb_auth_token', authToken.trim());
+        localStorage.setItem('adb_remote_token', authToken.trim());
       }
       
-      let fullUrl = remoteUrl.trim();
-      if (remoteToken.trim() && !fullUrl.includes('token=')) {
-        const separator = fullUrl.includes('?') ? '&' : '?';
-        fullUrl = `${fullUrl}${separator}token=${encodeURIComponent(remoteToken.trim())}`;
-      }
+      const wsUrl = "wss://adbcloud.onrender.com/client?token=" + encodeURIComponent(authToken.trim());
 
-      const client = await manager.connectRemote(fullUrl, (state) => {
+      const client = await manager.connectRemote(wsUrl, (state) => {
         setConnectionState(state);
       }, settings);
       setScrcpyClient(client);
@@ -87,6 +88,27 @@ export default function App() {
     audio: true,
     muteDeviceSpeaker: true,
   });
+
+  const isProcessing = ['connecting', 'authenticating', 'connected', 'pushing_server', 'starting_server'].includes(connectionState.status);
+
+  const getConnectButtonText = () => {
+    switch (connectionState.status) {
+      case 'connecting':
+        return "Opening Socket Bridge...";
+      case 'authenticating':
+        return "Awaiting Phone Prompt Keys...";
+      case 'pushing_server':
+        return "Injecting Scrcpy Jar...";
+      case 'starting_server':
+        return "Initializing Scrcpy Server...";
+      case 'connected':
+        return "Establishing Security Channel...";
+      case 'active':
+        return "Mirroring Session Live!";
+      default:
+        return "Connect Remotely Over Cloud";
+    }
+  };
 
   // Compatibility flags checked at runtime
   const [isSecure, setIsSecure] = useState<boolean>(true);
@@ -286,7 +308,7 @@ export default function App() {
       </header>
 
       <main className="flex-grow max-w-6xl w-full mx-auto p-6 flex flex-col justify-center">
-        {connectionState.status === 'idle' && (
+        {(connectionState.status === 'idle' || (connectionType === 'remote' && connectionState.status !== 'active')) && (
           <motion.div 
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -502,63 +524,82 @@ export default function App() {
               ) : (
                 <div className="flex flex-col items-center w-full">
                   <div className="w-16 h-16 bg-emerald-950/30 border border-emerald-500/20 rounded-2xl flex items-center justify-center text-emerald-400 mb-6">
-                    <Wifi className="w-8 h-8" />
+                    <Wifi className="w-8 h-8 font-light" />
                   </div>
                   <h3 className="text-lg font-bold text-gray-200 mb-2">Remote WebSocket Connection</h3>
                   <p className="text-xs text-gray-500 max-w-sm mb-6 leading-relaxed text-center">
-                    Establish a low-latency mirror stream from a remote device connected to a free Render/Railway server relay channel.
+                    Establish a low-latency mirror stream from a remote device connected to a secure Render server relay channel.
                   </p>
 
-                  <div className="w-full max-w-md bg-gray-950/50 border border-gray-800/80 p-5 rounded-xl mb-6 text-left animate-fade-in space-y-4">
+                  {/* Remote Device Tunnel Container */}
+                  <div className="w-full max-w-md bg-gradient-to-b from-gray-900/40 to-gray-950/20 border border-gray-800/80 p-5 rounded-xl mb-6 text-left animate-fade-in space-y-4 shadow-lg">
+                    <div className="flex items-center space-x-2 pb-2 border-b border-gray-800/40">
+                      <Terminal className="w-4 h-4 text-emerald-400" />
+                      <span className="text-xs font-bold text-gray-300 uppercase tracking-wider">Remote Device Tunnel</span>
+                    </div>
+
                     <div>
                       <label className="text-xs font-medium text-gray-400 block mb-1.5">ADB WebSocket Relay URL</label>
                       <div className="relative">
-                        <Terminal className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
+                        <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
                         <input
                           type="text"
-                          value={remoteUrl}
-                          onChange={(e) => setRemoteUrl(e.target.value)}
-                          placeholder="wss://adbcloud.onrender.com/client"
-                          className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-4 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500 transition-colors font-mono"
+                          value="wss://adbcloud.onrender.com/client"
+                          disabled
+                          className="w-full bg-gray-900/50 border border-gray-850 rounded-xl pl-9 pr-4 py-2.5 text-xs text-gray-400 cursor-not-allowed font-mono"
                         />
                       </div>
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-xs font-medium text-gray-400">Access Token / Password (Optional)</label>
-                        <span className="text-[9px] text-gray-500 font-mono">?token=...</span>
+                        <label className="text-xs font-medium text-gray-400">Render AUTH_TOKEN</label>
+                        <span className="text-[9px] text-emerald-400 font-mono bg-emerald-950/30 px-1.5 py-0.5 rounded border border-emerald-900/20">Protected</span>
                       </div>
                       <div className="relative">
                         <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500" />
                         <input
                           type="password"
-                          value={remoteToken}
-                          onChange={(e) => setRemoteToken(e.target.value)}
-                          placeholder="MyUltraSecureADBAccess2026"
+                          value={authToken}
+                          onChange={(e) => setAuthToken(e.target.value)}
+                          placeholder="Type or paste your private Render AUTH_TOKEN"
+                          disabled={isProcessing}
                           className="w-full bg-gray-900 border border-gray-700 rounded-xl pl-9 pr-4 py-2.5 text-xs text-gray-200 focus:outline-none focus:border-emerald-500 transition-colors font-mono"
                         />
                       </div>
-                      <p className="text-[9px] text-gray-600 mt-1.5">
-                        If provided, it will automatically append as <span className="font-mono text-gray-500">?token=VALUE</span> to the server connection URL.
-                      </p>
-                    </div>
-
-                    <div className="border-t border-gray-800/60 pt-3">
-                      <p className="text-[10px] text-gray-600 leading-normal">
-                        Ensure your remote device is connected to a machine running the relay client agent pointing to this server.
+                      <p className="text-[10px] text-gray-500 mt-1.5 leading-relaxed">
+                        Input your secure token. This will automatically compile a secure socket bridge endpoint pointing to the relay channel.
                       </p>
                     </div>
                   </div>
 
+                  {/* Connect Button */}
                   <button
                     onClick={handleConnectRemote}
-                    disabled={!remoteUrl.trim()}
+                    disabled={isProcessing || !authToken.trim()}
                     className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:hover:bg-emerald-600 text-white font-semibold rounded-xl shadow-lg shadow-emerald-900/20 hover:shadow-emerald-900/30 transition-all flex items-center space-x-2 text-sm"
                   >
                     <Wifi className="w-4 h-4" />
-                    <span>Connect Remote Device</span>
+                    <span>{getConnectButtonText()}</span>
                   </button>
+
+                  {/* Clean Red Subtext Error Alert below button container */}
+                  {connectionState.status === 'disconnected' && connectionState.error && (
+                    <div className="w-full max-w-md mt-6 p-4 bg-red-950/20 border border-red-900/30 rounded-xl text-left animate-fade-in">
+                      <div className="flex items-start space-x-2.5">
+                        <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+                        <div>
+                          <h4 className="text-xs font-bold text-red-300">WebSocket Tunnel Failure</h4>
+                          <p className="text-[11px] text-red-400 font-mono mt-1 leading-normal break-all">
+                            {connectionState.error}
+                          </p>
+                          <p className="text-[10px] text-gray-500 mt-2 leading-relaxed">
+                            Tips: Double-check your <code className="text-gray-400">AUTH_TOKEN</code>, verify the target phone&apos;s internet connectivity, and check if the remote relay agent is running.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="w-full max-w-sm mt-6 pt-5 border-t border-gray-800/80">
                     <div className="flex items-start space-x-2.5 text-left">
@@ -578,7 +619,7 @@ export default function App() {
         )}
 
         {/* Loading Progress Handshake Pipeline */}
-        {connectionState.status !== 'idle' && connectionState.status !== 'active' && connectionState.status !== 'disconnected' && (
+        {connectionType === 'usb' && connectionState.status !== 'idle' && connectionState.status !== 'active' && connectionState.status !== 'disconnected' && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -648,7 +689,7 @@ export default function App() {
         )}
 
         {/* Failure / Disconnection state panel */}
-        {connectionState.status === 'disconnected' && (
+        {connectionType === 'usb' && connectionState.status === 'disconnected' && (
           <motion.div 
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
