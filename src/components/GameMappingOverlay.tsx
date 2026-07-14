@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { motion } from 'motion/react';
 import { 
   Plus, 
   Trash2, 
@@ -147,8 +148,82 @@ export default function GameMappingOverlay({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isEditMode, setIsEditMode] = useState<boolean>(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
+  const [isEFootballGuideOpen, setIsEFootballGuideOpen] = useState<boolean>(true);
   const [selectedControlId, setSelectedControlId] = useState<string | null>(null);
   const [draggingControlId, setDraggingControlId] = useState<string | null>(null);
+
+  const [isEFootballSmartMode, setIsEFootballSmartMode] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('adb_ef_smart_mode') === 'true';
+    }
+    return false;
+  });
+
+  const [efootballMode, setEfootballMode] = useState<'attack' | 'defense'>('attack');
+
+  const [efootballCoords, setEfootballCoords] = useState(() => {
+    const defaults = {
+      centerX: 0.15,
+      centerY: 0.72,
+      maxRadius: 80,
+      passX: 0.76,
+      passY: 0.88,
+      throughX: 0.83,
+      throughY: 0.76,
+      shootX: 0.88,
+      shootY: 0.65,
+      dashX: 0.85,
+      dashY: 0.80,
+      shieldX: 0.05,
+      shieldY: 0.50,
+    };
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('adb_ef_coords');
+      if (saved) {
+        try {
+          return { ...defaults, ...JSON.parse(saved) };
+        } catch (e) {}
+      }
+    }
+    return defaults;
+  });
+
+  const prevActiveKeysRef = useRef<Set<string>>(new Set());
+
+  const macroStatesRef = useRef<{
+    isJoystickTracking: boolean;
+    lastJoyX?: number;
+    lastJoyY?: number;
+    isDashTracking: boolean;
+    isPassTracking: boolean;
+    isThroughTracking: boolean;
+    isShootTracking: boolean;
+    isShieldTracking: boolean;
+    sprintFlickFrame: boolean;
+    lastHasDirection: boolean;
+    isMatchupActive: boolean;
+    passActiveX?: number;
+    passActiveY?: number;
+    throughActiveX?: number;
+    throughActiveY?: number;
+    shootActiveX?: number;
+    shootActiveY?: number;
+  }>({
+    isJoystickTracking: false,
+    isDashTracking: false,
+    isPassTracking: false,
+    isThroughTracking: false,
+    isShootTracking: false,
+    isShieldTracking: false,
+    sprintFlickFrame: false,
+    lastHasDirection: false,
+    isMatchupActive: false
+  });
+
+  const saveEfootballCoords = (updated: typeof efootballCoords) => {
+    setEfootballCoords(updated);
+    localStorage.setItem('adb_ef_coords', JSON.stringify(updated));
+  };
   
   // Track visual offset for active on-screen joystick dragging
   const [joystickOffsets, setJoystickOffsets] = useState<Record<string, { x: number; y: number }>>({});
@@ -239,6 +314,11 @@ export default function GameMappingOverlay({
       const key = e.key.toLowerCase();
       activeKeysRef.current.add(key);
 
+      // Handle eFootball Mode Switching hotkey (v or `)
+      if (isEFootballSmartMode && (key === 'v' || key === '`')) {
+        setEfootballMode(prev => prev === 'attack' ? 'defense' : 'attack');
+      }
+
       // Prevent default scrolling keys during gameplay mapping
       if (isPlaying && [" ", "arrowup", "arrowdown", "arrowleft", "arrowright", "tab"].includes(e.key)) {
         e.preventDefault();
@@ -263,7 +343,7 @@ export default function GameMappingOverlay({
       window.removeEventListener('keyup', handleKeyUp, { capture: true });
       window.removeEventListener('blur', handleBlur);
     };
-  }, [isPlaying]);
+  }, [isPlaying, isEFootballSmartMode]);
 
   // Save profiles to localStorage
   const saveProfilesToStorage = (updatedProfiles: MappingProfile[]) => {
@@ -340,9 +420,677 @@ export default function GameMappingOverlay({
     }
   }, [client, acquirePointerSlot, releasePointerSlot]);
 
+  // Helper flick gesture macro for eFootball
+  const executeEfootballFlick = useCallback(async (
+    startX: number,
+    startY: number,
+    dirX: number,
+    dirY: number,
+    pointerIdVal: number,
+    holdDurationMs: number = 40
+  ) => {
+    if (!client?.controller?.injectTouch || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const isRotated = viewRotation === 90 || viewRotation === 270;
+    const origWidth = isRotated ? canvas.height : canvas.width;
+    const origHeight = isRotated ? canvas.width : canvas.height;
+    
+    const pointerId = BigInt(pointerIdVal);
+    const endX = startX + dirX;
+    const endY = startY + dirY;
+
+    try {
+      // 1. Touch Down
+      await client.controller.injectTouch({
+        action: MOTION_ACTION_DOWN,
+        pointerId,
+        pointerX: startX,
+        pointerY: startY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+
+      // 2. Touch Move
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await client.controller.injectTouch({
+        action: MOTION_ACTION_MOVE,
+        pointerId,
+        pointerX: endX,
+        pointerY: endY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+
+      // 3. Touch Up
+      await new Promise(resolve => setTimeout(resolve, holdDurationMs - 10));
+      await client.controller.injectTouch({
+        action: MOTION_ACTION_UP,
+        pointerId,
+        pointerX: endX,
+        pointerY: endY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 0,
+        actionButton: 0,
+        buttons: 0
+      });
+    } catch (err) {
+      console.warn("Failed eFootball flick macro:", err);
+    }
+  }, [client, viewRotation, canvasRef]);
+
+  // Specialized eFootball polling routine
+  const processEFootballTick = useCallback(() => {
+    if (!client?.controller?.injectTouch || !canvasRef.current) return;
+
+    const canvas = canvasRef.current;
+    const isRotated = viewRotation === 90 || viewRotation === 270;
+    const origWidth = isRotated ? canvas.height : canvas.width;
+    const origHeight = isRotated ? canvas.width : canvas.height;
+
+    const cx = efootballCoords.centerX * origWidth;
+    const cy = efootballCoords.centerY * origHeight;
+    const dashX = efootballCoords.dashX * origWidth;
+    const dashY = efootballCoords.dashY * origHeight;
+    const passX = efootballCoords.passX * origWidth;
+    const passY = efootballCoords.passY * origHeight;
+    const throughX = efootballCoords.throughX * origWidth;
+    const throughY = efootballCoords.throughY * origHeight;
+    const shootX = efootballCoords.shootX * origWidth;
+    const shootY = efootballCoords.shootY * origHeight;
+    const shieldX = efootballCoords.shieldX * origWidth;
+    const shieldY = efootballCoords.shieldY * origHeight;
+
+    // 1. WASD 8-Directional Joystick
+    let dx = 0;
+    let dy = 0;
+    if (activeKeysRef.current.has('w')) dy -= 1;
+    if (activeKeysRef.current.has('s')) dy += 1;
+    if (activeKeysRef.current.has('a')) dx -= 1;
+    if (activeKeysRef.current.has('d')) dx += 1;
+
+    const hasDirection = dx !== 0 || dy !== 0;
+    const isDashHeld = activeKeysRef.current.has('shift');
+
+    let currentRadius = efootballCoords.maxRadius;
+    if (hasDirection && !macroStatesRef.current.lastHasDirection && isDashHeld) {
+      macroStatesRef.current.sprintFlickFrame = true;
+    }
+
+    if (macroStatesRef.current.sprintFlickFrame) {
+      currentRadius = efootballCoords.maxRadius * 1.5;
+      macroStatesRef.current.sprintFlickFrame = false;
+    }
+    macroStatesRef.current.lastHasDirection = hasDirection;
+
+    if (hasDirection) {
+      let dx_rot = dx;
+      let dy_rot = dy;
+      const rot = viewRotation;
+      if (rot === 90) {
+        dx_rot = dy;
+        dy_rot = -dx;
+      } else if (rot === 180) {
+        dx_rot = -dx;
+        dy_rot = -dy;
+      } else if (rot === 270) {
+        dx_rot = -dy;
+        dy_rot = dx;
+      }
+
+      const angle = Math.atan2(dy_rot, dx_rot);
+      const targetX = cx + Math.cos(angle) * currentRadius;
+      const targetY = cy + Math.sin(angle) * currentRadius;
+
+      const pointerId = BigInt(0);
+
+      if (!macroStatesRef.current.isJoystickTracking) {
+        client.controller.injectTouch({
+          action: MOTION_ACTION_DOWN,
+          pointerId,
+          pointerX: cx,
+          pointerY: cy,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 1,
+          actionButton: 0,
+          buttons: 1
+        }).then(() => {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId,
+            pointerX: targetX,
+            pointerY: targetY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          });
+        });
+        macroStatesRef.current.isJoystickTracking = true;
+        macroStatesRef.current.lastJoyX = targetX;
+        macroStatesRef.current.lastJoyY = targetY;
+      } else {
+        client.controller.injectTouch({
+          action: MOTION_ACTION_MOVE,
+          pointerId,
+          pointerX: targetX,
+          pointerY: targetY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 1,
+          actionButton: 0,
+          buttons: 1
+        });
+        macroStatesRef.current.lastJoyX = targetX;
+        macroStatesRef.current.lastJoyY = targetY;
+      }
+    } else {
+      if (macroStatesRef.current.isJoystickTracking) {
+        const pointerId = BigInt(0);
+        client.controller.injectTouch({
+          action: MOTION_ACTION_UP,
+          pointerId,
+          pointerX: macroStatesRef.current.lastJoyX ?? cx,
+          pointerY: macroStatesRef.current.lastJoyY ?? cy,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 0,
+          actionButton: 0,
+          buttons: 0
+        });
+        macroStatesRef.current.isJoystickTracking = false;
+      }
+    }
+
+    // Helper functions for edge transitions
+    const isJustPressed = (k: string) => activeKeysRef.current.has(k) && !prevActiveKeysRef.current.has(k);
+    const isJustReleased = (k: string) => !activeKeysRef.current.has(k) && prevActiveKeysRef.current.has(k);
+
+    // 2. Dash button (pointerId 2)
+    if (isJustPressed('shift')) {
+      client.controller.injectTouch({
+        action: MOTION_ACTION_DOWN,
+        pointerId: BigInt(2),
+        pointerX: dashX,
+        pointerY: dashY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+      macroStatesRef.current.isDashTracking = true;
+    } else if (isJustReleased('shift')) {
+      client.controller.injectTouch({
+        action: MOTION_ACTION_UP,
+        pointerId: BigInt(2),
+        pointerX: dashX,
+        pointerY: dashY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 0,
+        actionButton: 0,
+        buttons: 0
+      });
+      macroStatesRef.current.isDashTracking = false;
+    }
+
+    // 3. Shield Double Tap (pointerId 3, neutral zone)
+    if (isJustPressed('c') || isJustPressed('k')) {
+      const executeShield = async () => {
+        const pId = BigInt(3);
+        try {
+          await client.controller.injectTouch({
+            action: MOTION_ACTION_DOWN, pointerId: pId, pointerX: shieldX, pointerY: shieldY,
+            videoWidth: origWidth, videoHeight: origHeight, pressure: 1, actionButton: 0, buttons: 1
+          });
+          await new Promise(r => setTimeout(r, 20));
+          await client.controller.injectTouch({
+            action: MOTION_ACTION_UP, pointerId: pId, pointerX: shieldX, pointerY: shieldY,
+            videoWidth: origWidth, videoHeight: origHeight, pressure: 0, actionButton: 0, buttons: 0
+          });
+          await new Promise(r => setTimeout(r, 45));
+          await client.controller.injectTouch({
+            action: MOTION_ACTION_DOWN, pointerId: pId, pointerX: shieldX, pointerY: shieldY,
+            videoWidth: origWidth, videoHeight: origHeight, pressure: 1, actionButton: 0, buttons: 1
+          });
+          await new Promise(r => setTimeout(r, 20));
+          await client.controller.injectTouch({
+            action: MOTION_ACTION_UP, pointerId: pId, pointerX: shieldX, pointerY: shieldY,
+            videoWidth: origWidth, videoHeight: origHeight, pressure: 0, actionButton: 0, buttons: 0
+          });
+        } catch (e) {
+          console.warn("Shield double tap failed:", e);
+        }
+      };
+      executeShield();
+    }
+
+    // 4. Pass / Pressure Action (pointerId 1)
+    if (isJustPressed('j')) {
+      client.controller.injectTouch({
+        action: MOTION_ACTION_DOWN,
+        pointerId: BigInt(1),
+        pointerX: passX,
+        pointerY: passY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+      macroStatesRef.current.isPassTracking = true;
+      (macroStatesRef.current as any).passActiveX = passX;
+      (macroStatesRef.current as any).passActiveY = passY;
+      (macroStatesRef.current as any).isMatchupActive = false;
+    }
+
+    if (macroStatesRef.current.isPassTracking) {
+      if (efootballMode === 'attack') {
+        // Stunning Low Pass: Flick LEFT
+        if (isJustPressed('a') || isJustPressed('arrowleft')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX - 90,
+            pointerY: passY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: passX - 90,
+                pointerY: passY,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isPassTracking = false;
+        }
+        // Stunning Lofted Pass: Flick RIGHT
+        else if (isJustPressed('d') || isJustPressed('arrowright')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX + 90,
+            pointerY: passY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: passX + 90,
+                pointerY: passY,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isPassTracking = false;
+        }
+        // Normal Lofted Pass: Flick UP
+        else if (isJustPressed('w') || isJustPressed('arrowup')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX,
+            pointerY: passY - 90,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: passX,
+                pointerY: passY - 90,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isPassTracking = false;
+        }
+        // Normal Lofted Pass: Flick DOWN
+        else if (isJustPressed('s') || isJustPressed('arrowdown')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX,
+            pointerY: passY + 90,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: passX,
+                pointerY: passY + 90,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isPassTracking = false;
+        }
+      } else {
+        // Defense Mode Pressure/Match-up holds
+        if (isJustPressed('a') || isJustPressed('arrowleft')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX - 90,
+            pointerY: passY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          });
+          (macroStatesRef.current as any).passActiveX = passX - 90;
+          (macroStatesRef.current as any).isMatchupActive = true;
+        } else if (isJustPressed('d') || isJustPressed('arrowright')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: passX + 90,
+            pointerY: passY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          });
+          (macroStatesRef.current as any).passActiveX = passX + 90;
+          (macroStatesRef.current as any).isMatchupActive = true;
+        }
+      }
+    }
+
+    if (isJustReleased('j')) {
+      if (macroStatesRef.current.isPassTracking) {
+        const activeX = (macroStatesRef.current as any).passActiveX ?? passX;
+        const activeY = (macroStatesRef.current as any).passActiveY ?? passY;
+        client.controller.injectTouch({
+          action: MOTION_ACTION_UP,
+          pointerId: BigInt(1),
+          pointerX: activeX,
+          pointerY: activeY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 0,
+          actionButton: 0,
+          buttons: 0
+        });
+        macroStatesRef.current.isPassTracking = false;
+      }
+    }
+
+    // 5. Through Ball / Call for Pressure (pointerId 1)
+    if (isJustPressed('i')) {
+      client.controller.injectTouch({
+        action: MOTION_ACTION_DOWN,
+        pointerId: BigInt(1),
+        pointerX: throughX,
+        pointerY: throughY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+      macroStatesRef.current.isThroughTracking = true;
+      (macroStatesRef.current as any).throughActiveX = throughX;
+      (macroStatesRef.current as any).throughActiveY = throughY;
+    }
+
+    if (macroStatesRef.current.isThroughTracking) {
+      if (efootballMode === 'attack') {
+        // Stunning Through Ball: Flick LEFT
+        if (isJustPressed('a') || isJustPressed('arrowleft')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: throughX - 90,
+            pointerY: throughY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: throughX - 90,
+                pointerY: throughY,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isThroughTracking = false;
+        }
+        // Stunning Chipped Through: Flick RIGHT
+        else if (isJustPressed('d') || isJustPressed('arrowright')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_MOVE,
+            pointerId: BigInt(1),
+            pointerX: throughX + 90,
+            pointerY: throughY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 1,
+            actionButton: 0,
+            buttons: 1
+          }).then(() => {
+            setTimeout(() => {
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId: BigInt(1),
+                pointerX: throughX + 90,
+                pointerY: throughY,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              });
+            }, 40);
+          });
+          macroStatesRef.current.isThroughTracking = false;
+        }
+      } else {
+        // Call for Pressure (Defense Mode): Flick Pressure button UP!
+        if (isJustPressed('w') || isJustPressed('arrowup')) {
+          client.controller.injectTouch({
+            action: MOTION_ACTION_UP,
+            pointerId: BigInt(1),
+            pointerX: throughX,
+            pointerY: throughY,
+            videoWidth: origWidth,
+            videoHeight: origHeight,
+            pressure: 0,
+            actionButton: 0,
+            buttons: 0
+          });
+          macroStatesRef.current.isThroughTracking = false;
+
+          // Trigger automated Pressure button swipe UP on pointer ID 4
+          executeEfootballFlick(passX, passY, 0, -90, 4, 45);
+        }
+      }
+    }
+
+    if (isJustReleased('i')) {
+      if (macroStatesRef.current.isThroughTracking) {
+        const activeX = (macroStatesRef.current as any).throughActiveX ?? throughX;
+        const activeY = (macroStatesRef.current as any).throughActiveY ?? throughY;
+        client.controller.injectTouch({
+          action: MOTION_ACTION_UP,
+          pointerId: BigInt(1),
+          pointerX: activeX,
+          pointerY: activeY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 0,
+          actionButton: 0,
+          buttons: 0
+        });
+        macroStatesRef.current.isThroughTracking = false;
+      }
+    }
+
+    // 6. Shoot / Clear Button (pointerId 1)
+    if (isJustPressed('l')) {
+      client.controller.injectTouch({
+        action: MOTION_ACTION_DOWN,
+        pointerId: BigInt(1),
+        pointerX: shootX,
+        pointerY: shootY,
+        videoWidth: origWidth,
+        videoHeight: origHeight,
+        pressure: 1,
+        actionButton: 0,
+        buttons: 1
+      });
+      macroStatesRef.current.isShootTracking = true;
+      (macroStatesRef.current as any).shootActiveX = shootX;
+      (macroStatesRef.current as any).shootActiveY = shootY;
+    }
+
+    if (macroStatesRef.current.isShootTracking && efootballMode === 'attack') {
+      // Stunning Shot: Flick LEFT or RIGHT
+      if (isJustPressed('a') || isJustPressed('arrowleft')) {
+        client.controller.injectTouch({
+          action: MOTION_ACTION_MOVE,
+          pointerId: BigInt(1),
+          pointerX: shootX - 90,
+          pointerY: shootY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 1,
+          actionButton: 0,
+          buttons: 1
+        }).then(() => {
+          setTimeout(() => {
+            client.controller.injectTouch({
+              action: MOTION_ACTION_UP,
+              pointerId: BigInt(1),
+              pointerX: shootX - 90,
+              pointerY: shootY,
+              videoWidth: origWidth,
+              videoHeight: origHeight,
+              pressure: 0,
+              actionButton: 0,
+              buttons: 0
+            });
+          }, 40);
+        });
+        macroStatesRef.current.isShootTracking = false;
+      } else if (isJustPressed('d') || isJustPressed('arrowright')) {
+        client.controller.injectTouch({
+          action: MOTION_ACTION_MOVE,
+          pointerId: BigInt(1),
+          pointerX: shootX + 90,
+          pointerY: shootY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 1,
+          actionButton: 0,
+          buttons: 1
+        }).then(() => {
+          setTimeout(() => {
+            client.controller.injectTouch({
+              action: MOTION_ACTION_UP,
+              pointerId: BigInt(1),
+              pointerX: shootX + 90,
+              pointerY: shootY,
+              videoWidth: origWidth,
+              videoHeight: origHeight,
+              pressure: 0,
+              actionButton: 0,
+              buttons: 0
+            });
+          }, 40);
+        });
+        macroStatesRef.current.isShootTracking = false;
+      }
+    }
+
+    if (isJustReleased('l')) {
+      if (macroStatesRef.current.isShootTracking) {
+        const activeX = (macroStatesRef.current as any).shootActiveX ?? shootX;
+        const activeY = (macroStatesRef.current as any).shootActiveY ?? shootY;
+        client.controller.injectTouch({
+          action: MOTION_ACTION_UP,
+          pointerId: BigInt(1),
+          pointerX: activeX,
+          pointerY: activeY,
+          videoWidth: origWidth,
+          videoHeight: origHeight,
+          pressure: 0,
+          actionButton: 0,
+          buttons: 0
+        });
+        macroStatesRef.current.isShootTracking = false;
+      }
+    }
+
+    // Save previous frame keys state
+    prevActiveKeysRef.current = new Set(activeKeysRef.current);
+  }, [client, efootballCoords, efootballMode, viewRotation, canvasRef, executeEfootballFlick]);
+
   // Main 60Hz Input state polling processor
   const processTick = useCallback(() => {
     if (!client?.controller?.injectTouch || !canvasRef.current) return;
+
+    if (isEFootballSmartMode) {
+      processEFootballTick();
+      return;
+    }
 
     const canvas = canvasRef.current;
     const isRotated = viewRotation === 90 || viewRotation === 270;
@@ -510,13 +1258,25 @@ export default function GameMappingOverlay({
         }
       }
     });
-  }, [client, currentProfile, viewRotation, canvasRef, executeSwipe, acquirePointerSlot, releasePointerSlot]);
+  }, [client, currentProfile, viewRotation, canvasRef, executeSwipe, acquirePointerSlot, releasePointerSlot, isEFootballSmartMode, processEFootballTick]);
 
   // Start / Stop Tick loop
   useEffect(() => {
     if (isPlaying) {
       activeKeysRef.current.clear();
+      prevActiveKeysRef.current.clear();
       controlStatesRef.current = {};
+      macroStatesRef.current = {
+        isJoystickTracking: false,
+        isDashTracking: false,
+        isPassTracking: false,
+        isThroughTracking: false,
+        isShootTracking: false,
+        isShieldTracking: false,
+        sprintFlickFrame: false,
+        lastHasDirection: false,
+        isMatchupActive: false
+      };
       tickIntervalRef.current = setInterval(processTick, 16.67); // 60Hz tick rate
       console.log("[WebADB-Gamepad] Macro worker loop launched at 60Hz");
     } else {
@@ -531,28 +1291,45 @@ export default function GameMappingOverlay({
         const origWidth = isRotated ? canvas.height : canvas.width;
         const origHeight = isRotated ? canvas.width : canvas.height;
 
-        currentProfile.controls.forEach((control) => {
-          const state = controlStatesRef.current[control.id];
-          if (state && state.isTracking) {
-            const slot = acquirePointerSlot(control.id);
-            const pointerId = BigInt(slot);
-            const x = (control.position?.x ?? control.center?.x ?? control.startPosition?.x ?? 0.5) * origWidth;
-            const y = (control.position?.y ?? control.center?.y ?? control.startPosition?.y ?? 0.5) * origHeight;
-
+        if (isEFootballSmartMode) {
+          const ids = [0, 1, 2, 3, 4];
+          ids.forEach(id => {
             client.controller.injectTouch({
               action: MOTION_ACTION_UP,
-              pointerId,
-              pointerX: x,
-              pointerY: y,
+              pointerId: BigInt(id),
+              pointerX: 0,
+              pointerY: 0,
               videoWidth: origWidth,
               videoHeight: origHeight,
               pressure: 0,
               actionButton: 0,
               buttons: 0
             }).catch(() => {});
-            releasePointerSlot(control.id);
-          }
-        });
+          });
+        } else {
+          currentProfile.controls.forEach((control) => {
+            const state = controlStatesRef.current[control.id];
+            if (state && state.isTracking) {
+              const slot = acquirePointerSlot(control.id);
+              const pointerId = BigInt(slot);
+              const x = (control.position?.x ?? control.center?.x ?? control.startPosition?.x ?? 0.5) * origWidth;
+              const y = (control.position?.y ?? control.center?.y ?? control.startPosition?.y ?? 0.5) * origHeight;
+
+              client.controller.injectTouch({
+                action: MOTION_ACTION_UP,
+                pointerId,
+                pointerX: x,
+                pointerY: y,
+                videoWidth: origWidth,
+                videoHeight: origHeight,
+                pressure: 0,
+                actionButton: 0,
+                buttons: 0
+              }).catch(() => {});
+              releasePointerSlot(control.id);
+            }
+          });
+        }
       }
       controlStatesRef.current = {};
     }
@@ -562,7 +1339,7 @@ export default function GameMappingOverlay({
         clearInterval(tickIntervalRef.current);
       }
     };
-  }, [isPlaying, processTick, client, currentProfile, viewRotation, canvasRef, acquirePointerSlot, releasePointerSlot]);
+  }, [isPlaying, processTick, client, currentProfile, viewRotation, canvasRef, acquirePointerSlot, releasePointerSlot, isEFootballSmartMode]);
 
   // Map unrotated relative coords [0,1] to visual absolute layout px on the bounding client-box
   const getVisualPosition = (relX: number, relY: number) => {
@@ -1373,6 +2150,313 @@ export default function GameMappingOverlay({
             </div>
           )}
 
+          {/* eFootball Advanced Mapping & Macro Engine UI */}
+          <div className="border-t border-slate-900 mt-4 pt-4 shrink-0 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-1.5">
+                <span className="text-amber-400">⚽</span>
+                <span className="text-[10px] font-black text-slate-200 tracking-wider uppercase">eFootball Smart Engine</span>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer select-none">
+                <input 
+                  type="checkbox" 
+                  checked={isEFootballSmartMode}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setIsEFootballSmartMode(checked);
+                    localStorage.setItem('adb_ef_smart_mode', String(checked));
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-4.5 bg-slate-800 rounded-full peer peer-focus:ring-1 peer-focus:ring-emerald-500 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-slate-300 after:border-slate-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-emerald-600 peer-checked:after:bg-slate-100"></div>
+              </label>
+            </div>
+
+            {isEFootballSmartMode && (
+              <motion.div 
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                className="space-y-3 text-[10px]"
+              >
+                {/* Visual Mode Indicator & Toggle */}
+                <div className="bg-slate-900/50 border border-slate-800/80 p-2.5 rounded-lg space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 font-bold">Active Possession Mode</span>
+                    <button
+                      onClick={() => setEfootballMode(prev => prev === 'attack' ? 'defense' : 'attack')}
+                      className={`px-2 py-0.5 rounded font-black text-[9px] uppercase tracking-tight border ${
+                        efootballMode === 'attack' 
+                          ? 'bg-emerald-950 text-emerald-400 border-emerald-900/30' 
+                          : 'bg-indigo-950 text-indigo-400 border-indigo-900/30'
+                      }`}
+                    >
+                      {efootballMode}
+                    </button>
+                  </div>
+                  <p className="text-[8px] text-slate-500 leading-normal">
+                    Press <code className="bg-slate-950 px-1 py-0.5 rounded text-slate-400 font-mono">v</code> or <code className="bg-slate-950 px-1 py-0.5 rounded text-slate-400 font-mono">`</code> to swap possession modes in real-time while playing.
+                  </p>
+                </div>
+
+                {/* Coordinate Target Configuration */}
+                <div className="space-y-2">
+                  <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block border-b border-slate-850 pb-1">Target Coordinates (Relative 0-1)</span>
+                  
+                  {/* Joystick config */}
+                  <div className="grid grid-cols-3 gap-1">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Joy X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={efootballCoords.centerX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, centerX: parseFloat(e.target.value) || 0.15 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Joy Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={efootballCoords.centerY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, centerY: parseFloat(e.target.value) || 0.72 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Radius</span>
+                      <input 
+                        type="number" 
+                        min="10"
+                        max="300"
+                        value={efootballCoords.maxRadius}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, maxRadius: parseInt(e.target.value) || 80 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Pass / Pressure config */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Pass/Press X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.passX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, passX: parseFloat(e.target.value) || 0.76 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Pass/Press Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.passY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, passY: parseFloat(e.target.value) || 0.88 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Through Ball / Pressure AI config */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Through X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.throughX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, throughX: parseFloat(e.target.value) || 0.83 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Through Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.throughY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, throughY: parseFloat(e.target.value) || 0.76 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Shoot config */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Shoot X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.shootX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, shootX: parseFloat(e.target.value) || 0.88 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Shoot Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.shootY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, shootY: parseFloat(e.target.value) || 0.65 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Dash / Sprint config */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Dash X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.dashX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, dashX: parseFloat(e.target.value) || 0.85 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium">Dash Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.dashY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, dashY: parseFloat(e.target.value) || 0.80 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Shield / Left-Side coordinate */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium font-mono">Shield X</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.shieldX}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, shieldX: parseFloat(e.target.value) || 0.05 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[8px] text-slate-500 font-medium font-mono">Shield Y</span>
+                      <input 
+                        type="number" 
+                        step="0.01"
+                        value={efootballCoords.shieldY}
+                        onChange={(e) => saveEfootballCoords({ ...efootballCoords, shieldY: parseFloat(e.target.value) || 0.50 })}
+                        className="w-full bg-slate-900 text-slate-200 text-[10px] px-1.5 py-1 rounded border border-slate-800 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </div>
+
+          {/* eFootball Mobile Pro Controls Guide */}
+          <div className="border-t border-slate-900 mt-3 pt-3 space-y-2 shrink-0">
+            <button
+              onClick={() => setIsEFootballGuideOpen(!isEFootballGuideOpen)}
+              className="w-full flex items-center justify-between text-left text-[10px] font-bold text-slate-300 uppercase tracking-wider hover:text-emerald-400 transition-colors"
+            >
+              <span className="flex items-center space-x-1.5">
+                <Gamepad className="w-3.5 h-3.5 text-emerald-400" />
+                <span>eFootball Controls Guide</span>
+              </span>
+              <span className="text-[10px] text-slate-500">{isEFootballGuideOpen ? "Hide" : "Show"}</span>
+            </button>
+            {isEFootballGuideOpen && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                className="bg-slate-900/60 border border-slate-900 rounded-lg p-2.5 space-y-2.5 text-[10px] max-h-[160px] overflow-y-auto custom-scrollbar"
+              >
+                <div>
+                  <h4 className="font-semibold text-emerald-400 mb-1 flex items-center justify-between">
+                    <span>Attack (Offense)</span>
+                    <span className="text-[8px] bg-slate-950 px-1 py-0.2 rounded text-slate-500 border border-slate-800">Possession</span>
+                  </h4>
+                  <ul className="space-y-1 text-slate-300">
+                    <li className="flex items-center justify-between">
+                      <span>Dribble / Move</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">W / A / S / D</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Sprint / Dash</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">Shift</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Short Pass</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">J</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Through Pass</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">I (Swipe Up)</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Shoot on Target</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">L</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Shield Ball</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-sky-400 border border-slate-800">K</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="border-t border-slate-950 pt-2">
+                  <h4 className="font-semibold text-rose-400 mb-1 flex items-center justify-between">
+                    <span>Defend (Defense)</span>
+                    <span className="text-[8px] bg-slate-950 px-1 py-0.2 rounded text-slate-500 border border-slate-800">No Ball</span>
+                  </h4>
+                  <ul className="space-y-1 text-slate-300">
+                    <li className="flex items-center justify-between">
+                      <span>Pressure (Auto)</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-rose-400 border border-slate-800">Hold J</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Match-Up shading</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-rose-400 border border-slate-800">Hold L</span>
+                    </li>
+                    <li className="flex items-center justify-between">
+                      <span>Dash Pressing</span>
+                      <span className="font-mono text-[9px] bg-slate-950 px-1 rounded text-rose-400 border border-slate-800">Shift + J</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="border-t border-slate-950 pt-2">
+                  <h4 className="font-semibold text-amber-400 mb-1">
+                    <span>Special combos</span>
+                  </h4>
+                  <ul className="space-y-1.5 text-[9.5px] text-slate-300 leading-relaxed">
+                    <li>
+                      <span className="font-semibold text-slate-200">Stunning Shot:</span> Hold <span className="font-mono text-amber-400">Shift</span> + Tap <span className="font-mono text-amber-400">L</span>
+                    </li>
+                    <li>
+                      <span className="font-semibold text-slate-200">Stunning Pass:</span> Hold <span className="font-mono text-amber-400">Shift</span> + Tap <span className="font-mono text-amber-400">J</span>
+                    </li>
+                    <li>
+                      <span className="font-semibold text-slate-200">Controlled Curler:</span> Tap <span className="font-mono text-amber-400">L</span> and flick mouse/finger down
+                    </li>
+                  </ul>
+                </div>
+              </motion.div>
+            )}
+          </div>
+
           <div className="border-t border-slate-850 mt-auto pt-2 text-[9px] text-slate-500 flex items-start space-x-1 shrink-0">
             <Info className="w-3 h-3 text-slate-400 shrink-0 mt-0.5" />
             <p className="leading-normal">
@@ -1541,6 +2625,38 @@ export default function GameMappingOverlay({
               </div>
             );
           })}
+
+          {/* Render eFootball Smart Target HUD Mappings */}
+          {isEFootballSmartMode && (
+            <>
+              {[
+                { name: 'Joy', x: efootballCoords.centerX, y: efootballCoords.centerY, color: 'border-amber-400/70 text-amber-400 bg-amber-400/5' },
+                { name: 'Pass/Press', x: efootballCoords.passX, y: efootballCoords.passY, color: 'border-emerald-400/70 text-emerald-400 bg-emerald-400/5' },
+                { name: 'Through', x: efootballCoords.throughX, y: efootballCoords.throughY, color: 'border-sky-400/70 text-sky-400 bg-sky-400/5' },
+                { name: 'Shoot', x: efootballCoords.shootX, y: efootballCoords.shootY, color: 'border-rose-400/70 text-rose-400 bg-rose-400/5' },
+                { name: 'Dash', x: efootballCoords.dashX, y: efootballCoords.dashY, color: 'border-indigo-400/70 text-indigo-400 bg-indigo-400/5' },
+                { name: 'Shield', x: efootballCoords.shieldX, y: efootballCoords.shieldY, color: 'border-purple-400/70 text-purple-400 bg-purple-400/5' },
+              ].map((target) => {
+                const pos = getVisualPosition(target.x, target.y);
+                return (
+                  <div
+                    key={target.name}
+                    style={{
+                      position: 'absolute',
+                      left: `${pos.x}px`,
+                      top: `${pos.y}px`,
+                      transform: 'translate(-50%, -50%)',
+                      pointerEvents: 'none',
+                    }}
+                    className={`w-10 h-10 rounded-full border border-dashed flex flex-col items-center justify-center text-[7px] font-black tracking-tight ${target.color}`}
+                  >
+                    <span className="text-[9px]">⚽</span>
+                    <span className="uppercase text-[6.5px] leading-none mt-0.5">{target.name}</span>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
     </>,
